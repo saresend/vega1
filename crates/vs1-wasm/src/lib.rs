@@ -1,6 +1,8 @@
-//! wasm-bindgen wrapper around `vs1_core::Analyzer`. Results cross the
-//! boundary as JSON strings to keep the binding surface small.
+//! wasm-bindgen wrapper around `vs1_core::SystemOne`. JSON crosses the
+//! boundary for requests/responses; embeddings stay inside WASM memory.
 
+use vs1_core::api::Request;
+use vs1_core::{Frame, ModelFiles, SystemOne as Core};
 use wasm_bindgen::prelude::*;
 
 fn js_err(e: impl std::fmt::Display) -> JsError {
@@ -8,39 +10,60 @@ fn js_err(e: impl std::fmt::Display) -> JsError {
 }
 
 #[wasm_bindgen]
-pub struct Analyzer {
-    inner: vs1_core::Analyzer,
+pub struct SystemOne {
+    inner: Core,
+    frames: Vec<Vec<f32>>,
 }
 
 #[wasm_bindgen]
-impl Analyzer {
-    /// Loads the YOLOX-nano ONNX detector from its raw bytes.
+impl SystemOne {
+    /// Loads encoders from raw bytes. `head` may be empty for zero-shot.
     #[wasm_bindgen(constructor)]
-    pub fn new(detector_onnx: &[u8]) -> Result<Analyzer, JsError> {
-        let inner = vs1_core::Analyzer::new(detector_onnx).map_err(|e| js_err(format!("{e:#}")))?;
-        Ok(Analyzer { inner })
+    pub fn new(vision_onnx: &[u8], text_onnx: &[u8], tokenizer_json: &[u8], head: &[u8]) -> Result<SystemOne, JsError> {
+        let inner = Core::new(ModelFiles {
+            vision_onnx,
+            text_onnx,
+            tokenizer_json,
+            head: (!head.is_empty()).then_some(head),
+        })
+        .map_err(|e| js_err(format!("{e:#}")))?;
+        Ok(SystemOne { inner, frames: Vec::new() })
     }
 
-    pub fn reset(&mut self) {
-        self.inner.reset();
+    #[wasm_bindgen(getter, js_name = modelName)]
+    pub fn model_name(&self) -> String {
+        self.inner.model_name().to_string()
     }
 
-    /// Scans the whole video file for caption/subtitle tracks. Returns JSON.
-    #[wasm_bindgen(js_name = probeContainer)]
-    pub fn probe_container(&mut self, file_bytes: &[u8]) -> Result<String, JsError> {
-        serde_json::to_string(self.inner.probe_container(file_bytes)).map_err(js_err)
+    /// Starts a new video state.
+    #[wasm_bindgen(js_name = clearFrames)]
+    pub fn clear_frames(&mut self) {
+        self.frames.clear();
     }
 
-    /// Analyzes one RGBA frame sampled at `t` seconds. Returns JSON.
+    /// Embeds one RGBA frame into the current video state.
     #[wasm_bindgen(js_name = pushFrame)]
-    pub fn push_frame(&mut self, rgba: &[u8], width: u32, height: u32, t: f64) -> Result<String, JsError> {
-        let frame = vs1_core::Frame::new(rgba, width as usize, height as usize).map_err(js_err)?;
-        let result = self.inner.push_frame(&frame, t).map_err(|e| js_err(format!("{e:#}")))?;
-        serde_json::to_string(&result).map_err(js_err)
+    pub fn push_frame(&mut self, rgba: &[u8], width: u32, height: u32) -> Result<(), JsError> {
+        let frame = Frame::new(rgba, width as usize, height as usize).map_err(js_err)?;
+        let emb = self.inner.embed_frame(&frame).map_err(|e| js_err(format!("{e:#}")))?;
+        self.frames.push(emb);
+        Ok(())
     }
 
-    /// Final answers for everything pushed since the last reset. Returns JSON.
-    pub fn report(&self, duration_seconds: f64) -> Result<String, JsError> {
-        serde_json::to_string(&self.inner.report(duration_seconds)).map_err(js_err)
+    /// Validates a request and embeds its questions (cached for `evaluate`),
+    /// so bad requests fail before any video is decoded.
+    pub fn validate(&mut self, request_json: &str) -> Result<(), JsError> {
+        let request = Request::parse(request_json).map_err(js_err)?;
+        self.inner.compile(&request).map_err(|e| js_err(format!("{e:#}")))?;
+        Ok(())
+    }
+
+    /// Answers a Jev-style request (`{model?, questions}`, JSON) against the
+    /// current video state. Returns the Jev-style response as JSON.
+    pub fn evaluate(&mut self, request_json: &str) -> Result<String, JsError> {
+        let request = Request::parse(request_json).map_err(js_err)?;
+        let compiled = self.inner.compile(&request).map_err(|e| js_err(format!("{e:#}")))?;
+        let response = self.inner.answer(&self.frames, &compiled).map_err(|e| js_err(format!("{e:#}")))?;
+        serde_json::to_string(&response).map_err(js_err)
     }
 }

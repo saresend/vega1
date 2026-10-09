@@ -1,198 +1,165 @@
-//! vs1-core: a compact, fully on-device "System 1" video analyzer.
+//! vs1-core: a general, on-device "System One" model for video.
 //!
-//! Feed sampled RGBA frames with timestamps to [`Analyzer::push_frame`], then
-//! call [`Analyzer::report`] for answers to the built-in questions:
+//! Same contract as TypeSafe's Jev (`POST /v1/systemone`): a state plus a map
+//! of typed questions (`noul`, `choice`, `score`) in, calibrated typed answers
+//! out — except the state is a video, and everything runs locally (native or
+//! WASM).
 //!
-//! * `subject_count` — how many distinct people appear across the video
-//!   (detector → tracker → re-identification merge).
-//! * `captioned` — whether the video carries captions, either as a container
-//!   text track or burned into the picture.
+//! ```text
+//! frames ──ImageEncoder──► frame embeddings ─┐
+//! questions ──prompts──TextEncoder──► option embeddings ─┴─► Head ─► probabilities ─► Answers
+//! ```
 //!
-//! Everything here compiles to `wasm32-unknown-unknown`; see `vs1-wasm`.
+//! Questions are compiled once ([`SystemOne::compile`]) and can be reused
+//! across videos; frames are embedded once ([`SystemOne::embed_frame`]) and
+//! can be re-asked any question set.
 
-pub mod appearance;
-pub mod captions;
-pub mod container;
-pub mod detect;
+pub mod api;
+pub mod encoders;
+pub mod head;
 pub mod image;
-pub mod shots;
-pub mod track;
+pub mod prompts;
 
-use serde::Serialize;
+use std::collections::HashMap;
 
-use captions::{BurnedInCaptions, CaptionAggregator, CaptionObservation};
-use container::{ContainerProbe, TextTrack};
-use detect::{BBox, PersonDetector};
+use indexmap::IndexMap;
+
+use api::{round4, Answer, Question, Request, Response, Usage};
+use encoders::{ImageEncoder, TextEncoder};
+use head::{Head, TrainedHead};
 pub use image::Frame;
-use shots::ShotDetector;
-use track::{Subject, Tracker, TrackerConfig};
 
-/// What one sampled frame contributed, for live overlays.
-#[derive(Debug, Clone, Serialize)]
-pub struct FrameResult {
-    pub t: f64,
-    pub shot_cut: bool,
-    pub subjects: Vec<FrameSubject>,
-    pub caption: Option<CaptionObservation>,
+/// Raw model files; how they're fetched is the caller's business.
+pub struct ModelFiles<'a> {
+    pub vision_onnx: &'a [u8],
+    pub text_onnx: &'a [u8],
+    pub tokenizer_json: &'a [u8],
+    /// Optional trained answer head (safetensors). Zero-shot without it.
+    pub head: Option<&'a [u8]>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct FrameSubject {
-    pub bbox: BBox,
-    pub score: f32,
-    pub track_id: u32,
-    pub confirmed: bool,
+/// A question set, embedded and ready to apply to any video.
+pub struct Compiled {
+    questions: Vec<CompiledQuestion>,
+    input_tokens: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct Report {
-    pub duration_seconds: f64,
-    pub frames_analyzed: usize,
-    pub shot_cuts: Vec<f64>,
-    pub answers: Answers,
+struct CompiledQuestion {
+    key: String,
+    kind: Kind,
+    question: Vec<f32>,
+    options: Vec<Vec<f32>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct Answers {
-    pub subject_count: SubjectCount,
-    pub captioned: Captioned,
+enum Kind {
+    Noul,
+    Choice { labels: Vec<String> },
+    Score { legend: Vec<String> },
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SubjectCount {
-    pub value: usize,
-    pub confidence: f32,
-    pub max_in_single_frame: usize,
-    pub reidentified_merges: usize,
-    pub subjects: Vec<Subject>,
+pub struct SystemOne {
+    image: ImageEncoder,
+    text: TextEncoder,
+    head: Head,
+    text_cache: HashMap<(String, String), (Vec<f32>, usize)>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct Captioned {
-    pub value: bool,
-    pub confidence: f32,
-    /// "caption_track", "burned_in" or "none".
-    pub source: &'static str,
-    pub caption_tracks: Vec<TextTrack>,
-    pub container_format: Option<&'static str>,
-    pub burned_in: BurnedInCaptions,
-}
-
-pub struct Analyzer {
-    detector: PersonDetector,
-    tracker_config: TrackerConfig,
-    tracker: Tracker,
-    shots: ShotDetector,
-    captions: CaptionAggregator,
-    container: Option<ContainerProbe>,
-    frames: usize,
-    max_in_frame: usize,
-    cut_times: Vec<f64>,
-}
-
-impl Analyzer {
-    pub fn new(detector_onnx: &[u8]) -> anyhow::Result<Self> {
-        let detector = PersonDetector::from_onnx_bytes(detector_onnx)?;
-        let tracker_config = TrackerConfig::default();
+impl SystemOne {
+    pub fn new(files: ModelFiles) -> anyhow::Result<Self> {
+        let head = match files.head {
+            Some(bytes) => Head::Trained(TrainedHead::from_safetensors(bytes)?),
+            None => Head::default(),
+        };
         Ok(Self {
-            detector,
-            tracker: Tracker::new(tracker_config.clone()),
-            tracker_config,
-            shots: ShotDetector::default(),
-            captions: CaptionAggregator::default(),
-            container: None,
-            frames: 0,
-            max_in_frame: 0,
-            cut_times: Vec::new(),
+            image: ImageEncoder::from_onnx_bytes(files.vision_onnx)?,
+            text: TextEncoder::from_bytes(files.text_onnx, files.tokenizer_json)?,
+            head,
+            text_cache: HashMap::new(),
         })
     }
 
-    /// Clears per-video state, keeping the loaded model.
-    pub fn reset(&mut self) {
-        self.tracker = Tracker::new(self.tracker_config.clone());
-        self.shots = ShotDetector::default();
-        self.captions = CaptionAggregator::default();
-        self.container = None;
-        self.frames = 0;
-        self.max_in_frame = 0;
-        self.cut_times.clear();
+    pub fn model_name(&self) -> &str {
+        self.head.name()
     }
 
-    /// Inspects the raw file bytes for caption/subtitle tracks.
-    pub fn probe_container(&mut self, file_bytes: &[u8]) -> &ContainerProbe {
-        self.container.insert(container::probe(file_bytes))
+    pub fn embed_frame(&self, frame: &Frame) -> anyhow::Result<Vec<f32>> {
+        self.image.embed(frame)
     }
 
-    /// Processes one sampled frame. Timestamps must be non-decreasing.
-    pub fn push_frame(&mut self, frame: &Frame, t: f64) -> anyhow::Result<FrameResult> {
-        let gray = frame.to_gray();
-        let shot_cut = self.shots.is_cut(&gray);
-        if shot_cut {
-            self.cut_times.push(t);
+    fn embed_text(&mut self, context: &str, focus: &str) -> anyhow::Result<(Vec<f32>, usize)> {
+        let key = (context.to_string(), focus.to_string());
+        if let Some(hit) = self.text_cache.get(&key) {
+            return Ok(hit.clone());
         }
-
-        let dets = self.detector.detect(frame)?;
-        let embeds: Vec<Vec<f32>> = dets.iter().map(|d| appearance::embed(frame, &d.bbox)).collect();
-        let assignments = self.tracker.update(t, &dets, &embeds, shot_cut);
-        self.max_in_frame = self.max_in_frame.max(dets.len());
-
-        let caption = captions::observe(&gray);
-        self.captions.push(caption.as_ref());
-        self.frames += 1;
-
-        let subjects = dets
-            .iter()
-            .zip(assignments)
-            .map(|(d, a)| FrameSubject { bbox: d.bbox, score: d.score, track_id: a.track_id, confirmed: a.confirmed })
-            .collect();
-        Ok(FrameResult { t, shot_cut, subjects, caption })
+        let value = self.text.embed_pair(context, focus)?;
+        self.text_cache.insert(key, value.clone());
+        Ok(value)
     }
 
-    pub fn report(&self, duration_seconds: f64) -> Report {
-        let (subjects, merges) = self.tracker.subjects();
-        let subject_confidence = if self.frames == 0 {
-            0.0
-        } else {
-            let mut c = 0.9f32;
-            c -= (0.05 * merges as f32).min(0.3);
-            c -= (0.05 * self.cut_times.len() as f32).min(0.2);
-            if self.max_in_frame >= 6 {
-                c -= 0.15; // crowds: occlusion and ID switches
-            }
-            c.clamp(0.2, 0.95)
-        };
-
-        let burned_in = self.captions.summary(duration_seconds);
-        let tracks = self.container.as_ref().map(|c| c.text_tracks.clone()).unwrap_or_default();
-        let (value, confidence, source) = if !tracks.is_empty() {
-            (true, 0.99, "caption_track")
-        } else if burned_in.detected {
-            (true, burned_in.probability, "burned_in")
-        } else {
-            (false, 1.0 - burned_in.probability, "none")
-        };
-
-        Report {
-            duration_seconds,
-            frames_analyzed: self.frames,
-            shot_cuts: self.cut_times.clone(),
-            answers: Answers {
-                subject_count: SubjectCount {
-                    value: subjects.len(),
-                    confidence: subject_confidence,
-                    max_in_single_frame: self.max_in_frame,
-                    reidentified_merges: merges,
-                    subjects,
-                },
-                captioned: Captioned {
-                    value,
-                    confidence,
-                    source,
-                    caption_tracks: tracks,
-                    container_format: self.container.as_ref().map(|c| c.format),
-                    burned_in,
-                },
-            },
+    /// Embeds one question: (question embedding, option embeddings, tokens used).
+    pub fn embed_question(&mut self, q: &Question) -> anyhow::Result<(Vec<f32>, Vec<Vec<f32>>, usize)> {
+        let prompts = prompts::build(q);
+        let (question, mut tokens) = self.embed_text("", &prompts.question)?;
+        let mut options = Vec::with_capacity(prompts.options.len());
+        for o in &prompts.options {
+            let (emb, n) = self.embed_text(&o.context, &o.focus)?;
+            tokens += n;
+            options.push(emb);
         }
+        Ok((question, options, tokens))
     }
+
+    /// Validates and embeds a question set.
+    pub fn compile(&mut self, request: &Request) -> anyhow::Result<Compiled> {
+        request.validate()?;
+        let mut questions = Vec::with_capacity(request.questions.len());
+        let mut input_tokens = 0;
+        for (key, q) in &request.questions {
+            let (question, options, n) = self.embed_question(q)?;
+            input_tokens += n;
+            let kind = match q {
+                Question::Noul { .. } => Kind::Noul,
+                Question::Choice { criteria, .. } => Kind::Choice { labels: criteria.keys().cloned().collect() },
+                Question::Score { criteria, .. } => Kind::Score { legend: criteria.iter().map(api::render).collect() },
+            };
+            questions.push(CompiledQuestion { key: key.clone(), kind, question, options });
+        }
+        Ok(Compiled { questions, input_tokens })
+    }
+
+    /// Answers a compiled question set for a video given its frame embeddings.
+    pub fn answer(&self, frames: &[Vec<f32>], compiled: &Compiled) -> anyhow::Result<Response> {
+        anyhow::ensure!(!frames.is_empty(), "the video state has no frames");
+        let mut answers = IndexMap::new();
+        for q in &compiled.questions {
+            let probs = self.head.probabilities(frames, &q.question, &q.options);
+            let answer = match &q.kind {
+                Kind::Noul => Answer::Noul { noul: round4(probs[0]) },
+                Kind::Choice { labels } => {
+                    let best = argmax(&probs);
+                    Answer::Choice {
+                        choice: labels[best].clone(),
+                        probabilities: labels.iter().cloned().zip(probs.iter().map(|&p| round4(p))).collect(),
+                        confidence: round4(api::choice_confidence(&probs)),
+                    }
+                }
+                Kind::Score { legend } => Answer::Score {
+                    score: round4(api::score_value(&probs)),
+                    legend: legend.iter().enumerate().map(|(i, l)| (i.to_string(), l.clone())).collect(),
+                    probabilities: probs.iter().enumerate().map(|(i, &p)| (i.to_string(), round4(p))).collect(),
+                    confidence: round4(api::score_confidence(&probs)),
+                },
+            };
+            answers.insert(q.key.clone(), answer);
+        }
+        Ok(Response {
+            model: self.model_name().to_string(),
+            answers,
+            usage: Usage { input_frames: frames.len(), input_tokens: compiled.input_tokens, output_tokens: 0 },
+        })
+    }
+}
+
+fn argmax(v: &[f32]) -> usize {
+    v.iter().enumerate().fold((0, f32::NEG_INFINITY), |best, (i, &x)| if x > best.1 { (i, x) } else { best }).0
 }

@@ -1,5 +1,6 @@
-//! Minimal image types. Frames arrive as RGBA8 (what browsers hand out via
-//! `getImageData` and what ffmpeg emits with `-pix_fmt rgba`).
+//! Frames arrive as RGBA8 (what browsers hand out via `getImageData` and what
+//! ffmpeg emits with `-pix_fmt rgba`). Training features are extracted through
+//! this same code (via the CLI), so train and serve preprocessing can't drift.
 
 use anyhow::ensure;
 
@@ -24,13 +25,57 @@ impl<'a> Frame<'a> {
     }
 
     #[inline]
-    pub fn rgb(&self, x: usize, y: usize) -> [u8; 3] {
+    fn rgb(&self, x: usize, y: usize) -> [f32; 3] {
         let i = (y * self.width + x) * 4;
-        [self.rgba[i], self.rgba[i + 1], self.rgba[i + 2]]
+        [self.rgba[i] as f32, self.rgba[i + 1] as f32, self.rgba[i + 2] as f32]
     }
 
-    /// Bilinear RGB sample at continuous pixel coordinates (clamped to the frame).
-    pub fn sample_bilinear(&self, fx: f32, fy: f32) -> [f32; 3] {
+    /// CLIP-style input: resize the shortest side to `size`, centre-crop to
+    /// `size`x`size`, scale to 0..1, planar CHW. Downscaling averages each
+    /// output pixel's source footprint (area resampling) to avoid aliasing;
+    /// upscaling falls back to bilinear.
+    pub fn to_clip_input(&self, size: usize) -> Vec<f32> {
+        let side = self.width.min(self.height) as f32;
+        let x0 = (self.width as f32 - side) / 2.0;
+        let y0 = (self.height as f32 - side) / 2.0;
+        let step = side / size as f32;
+        let plane = size * size;
+        let mut out = vec![0.0f32; 3 * plane];
+        for oy in 0..size {
+            for ox in 0..size {
+                let rgb = if step > 1.0 {
+                    self.area_average(x0 + ox as f32 * step, y0 + oy as f32 * step, step)
+                } else {
+                    self.bilinear(x0 + (ox as f32 + 0.5) * step - 0.5, y0 + (oy as f32 + 0.5) * step - 0.5)
+                };
+                let i = oy * size + ox;
+                for c in 0..3 {
+                    out[c * plane + i] = rgb[c] / 255.0;
+                }
+            }
+        }
+        out
+    }
+
+    fn area_average(&self, fx: f32, fy: f32, step: f32) -> [f32; 3] {
+        let xa = (fx.round() as usize).min(self.width - 1);
+        let ya = (fy.round() as usize).min(self.height - 1);
+        let xb = ((fx + step).round() as usize).clamp(xa + 1, self.width);
+        let yb = ((fy + step).round() as usize).clamp(ya + 1, self.height);
+        let mut acc = [0.0f32; 3];
+        for y in ya..yb {
+            for x in xa..xb {
+                let p = self.rgb(x, y);
+                acc[0] += p[0];
+                acc[1] += p[1];
+                acc[2] += p[2];
+            }
+        }
+        let n = ((xb - xa) * (yb - ya)) as f32;
+        acc.map(|v| v / n)
+    }
+
+    fn bilinear(&self, fx: f32, fy: f32) -> [f32; 3] {
         let fx = fx.clamp(0.0, (self.width - 1) as f32);
         let fy = fy.clamp(0.0, (self.height - 1) as f32);
         let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
@@ -39,34 +84,11 @@ impl<'a> Frame<'a> {
         let (p00, p10, p01, p11) = (self.rgb(x0, y0), self.rgb(x1, y0), self.rgb(x0, y1), self.rgb(x1, y1));
         let mut out = [0.0; 3];
         for c in 0..3 {
-            let top = p00[c] as f32 * (1.0 - ax) + p10[c] as f32 * ax;
-            let bottom = p01[c] as f32 * (1.0 - ax) + p11[c] as f32 * ax;
+            let top = p00[c] * (1.0 - ax) + p10[c] * ax;
+            let bottom = p01[c] * (1.0 - ax) + p11[c] * ax;
             out[c] = top * (1.0 - ay) + bottom * ay;
         }
         out
-    }
-
-    pub fn to_gray(&self) -> Gray {
-        let data = self
-            .rgba
-            .chunks_exact(4)
-            .map(|p| (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) as u8)
-            .collect();
-        Gray { data, width: self.width, height: self.height }
-    }
-}
-
-/// 8-bit luma image.
-pub struct Gray {
-    pub data: Vec<u8>,
-    pub width: usize,
-    pub height: usize,
-}
-
-impl Gray {
-    #[inline]
-    pub fn at(&self, x: usize, y: usize) -> u8 {
-        self.data[y * self.width + x]
     }
 }
 
@@ -81,14 +103,29 @@ mod tests {
     }
 
     #[test]
-    fn bilinear_interpolates_midpoint() {
-        // 2x1 frame: black then white.
-        let px = [0, 0, 0, 255, 255, 255, 255, 255];
-        let f = Frame::new(&px, 2, 1).err();
-        assert!(f.is_some(), "1-row frames are rejected");
-        let px = [0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255];
-        let f = Frame::new(&px, 2, 2).unwrap();
-        let s = f.sample_bilinear(0.5, 0.0);
-        assert!((s[0] - 127.5).abs() < 0.01);
+    fn clip_input_center_crops_and_scales() {
+        // 8x4 frame: left quarter red, middle half green, right quarter blue.
+        let (w, h) = (8, 4);
+        let mut px = Vec::new();
+        for _ in 0..h {
+            for x in 0..w {
+                let c = if x < 2 { [255, 0, 0] } else if x < 6 { [0, 255, 0] } else { [0, 0, 255] };
+                px.extend_from_slice(&[c[0], c[1], c[2], 255]);
+            }
+        }
+        let f = Frame::new(&px, w, h).unwrap();
+        let out = f.to_clip_input(2);
+        // Centre 4x4 crop is all green; downscaled 2x2 stays green, in 0..1.
+        assert_eq!(&out[0..4], &[0.0; 4], "red plane");
+        assert_eq!(&out[4..8], &[1.0; 4], "green plane");
+        assert_eq!(&out[8..12], &[0.0; 4], "blue plane");
+    }
+
+    #[test]
+    fn area_average_blends_footprint() {
+        // 4x4 checkerboard of 0/255 downscaled to 1x1 averages to mid-gray.
+        let px: Vec<u8> = (0..16).flat_map(|i| { let v = if (i / 4 + i % 4) % 2 == 0 { 0 } else { 255 }; [v, v, v, 255] }).collect();
+        let out = Frame::new(&px, 4, 4).unwrap().to_clip_input(1);
+        assert!((out[0] - 0.5).abs() < 1e-6);
     }
 }

@@ -3,76 +3,72 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Video System 1</title>
+  <title>Video System One</title>
   <style>
     :root {
-      --bg: #f7f7f5; --fg: #1c1c1c; --muted: #6b6b6b; --card: #ffffff; --border: #e2e2de; --accent: #2f5bd3;
+      --bg: #f6f6f3; --fg: #1b1b1b; --muted: #6a6a6a; --card: #ffffff; --border: #e0e0db;
+      --accent: #2f5bd3; --bar: #dfe6fb; --code: #fafaf8;
     }
     @media (prefers-color-scheme: dark) {
-      :root { --bg: #151515; --fg: #ececec; --muted: #9a9a9a; --card: #1f1f1f; --border: #333; --accent: #7aa2ff; }
+      :root {
+        --bg: #141414; --fg: #ececec; --muted: #9a9a9a; --card: #1d1d1d; --border: #333;
+        --accent: #7ea4ff; --bar: #26324f; --code: #181818;
+      }
     }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
-    main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
-    h1 { font-size: 22px; margin: 0 0 4px; }
+    main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 48px; }
+    h1 { font-size: 22px; margin: 0; }
     .muted { color: var(--muted); }
-    .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 16px 0; }
-    .stage { position: relative; background: #000; border-radius: 8px; overflow: hidden; }
-    .stage video, .stage canvas { display: block; width: 100%; height: auto; }
-    .stage canvas { position: absolute; inset: 0; height: 100%; }
-    progress { width: 100%; margin: 8px 0 4px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin-top: 20px; }
-    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
-    .card h2 { font-size: 14px; font-weight: 600; margin: 0; color: var(--muted); }
-    .value { font-size: 40px; font-weight: 700; line-height: 1.2; color: var(--accent); }
-    .card ul { margin: 8px 0 0; padding-left: 18px; font-size: 13px; }
-    details { margin-top: 16px; }
-    pre { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; overflow: auto; font-size: 12px; }
-    button { font: inherit; }
+    .layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; margin-top: 16px; }
+    @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } }
+    .panel { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+    .panel h2 { font-size: 13px; font-weight: 600; margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+    video { width: 100%; border-radius: 6px; background: #000; display: block; margin-top: 10px; }
+    textarea { width: 100%; min-height: 340px; font: 12px/1.45 ui-monospace, monospace; background: var(--code); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 6px; padding: 10px; resize: vertical; }
+    .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 10px; }
+    button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: default; }
+    progress { width: 100%; }
+    .answers { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 20px; }
+    .answer .key { font: 12px ui-monospace, monospace; color: var(--muted); }
+    .answer .value { font-size: 26px; font-weight: 700; color: var(--accent); margin: 2px 0; }
+    .bars { margin-top: 8px; display: grid; gap: 4px; font-size: 12px; }
+    .bar { position: relative; padding: 2px 6px; border-radius: 4px; overflow: hidden; }
+    .bar span { position: relative; }
+    .bar i { position: absolute; inset: 0 auto 0 0; background: var(--bar); }
+    .bar b { float: right; position: relative; font-weight: 500; }
+    pre { background: var(--code); border: 1px solid var(--border); border-radius: 8px; padding: 12px; overflow: auto; font-size: 12px; }
+    .error { color: #c62828; white-space: pre-wrap; }
   </style>
 </head>
 <body>
 <main>
-  <h1>Video System 1</h1>
-  <div class="muted">Runs entirely in your browser (Rust → WebAssembly). Your video never leaves this page.</div>
+  <h1>Video System One</h1>
+  <div class="muted">Typed questions about a video, answered with calibrated probabilities — Jev's API with a video as the state.
+    Runs entirely in your browser (Rust → WebAssembly); the video never leaves this page.</div>
 
-  <div class="controls">
-    <input type="file" id="file" accept="video/*" disabled>
-    <label>Sample rate
-      <select id="fps">
-        <option value="1">1 fps</option>
-        <option value="2" selected>2 fps</option>
-        <option value="4">4 fps</option>
-      </select>
-    </label>
-    <button id="cancel" hidden>Cancel</button>
+  <div class="layout">
+    <section class="panel">
+      <h2>State: video</h2>
+      <input type="file" id="file" accept="video/*">
+      <video id="preview" controls muted playsinline></video>
+      <div class="row">
+        <label>Frames <select id="frames"><option>8</option><option selected>16</option><option>32</option></select></label>
+        <button id="run" disabled>Evaluate</button>
+      </div>
+      <progress id="progress" value="0" max="1"></progress>
+      <div id="status" class="muted">Loading model…</div>
+    </section>
+    <section class="panel">
+      <h2>Questions</h2>
+      <textarea id="questions" spellcheck="false"></textarea>
+    </section>
   </div>
 
-  <div class="stage">
-    <video id="video" muted playsinline></video>
-    <canvas id="overlay"></canvas>
-  </div>
-  <progress id="progress" value="0" max="1"></progress>
-  <div id="status" class="muted">Starting…</div>
-
-  <section id="results" hidden>
-    <div class="grid">
-      <div class="card">
-        <h2>How many subjects are there throughout the video?</h2>
-        <div class="value" id="subjects-value"></div>
-        <div class="muted" id="subjects-detail"></div>
-        <ul id="subjects-list"></ul>
-      </div>
-      <div class="card">
-        <h2>Is the video captioned?</h2>
-        <div class="value" id="captions-value"></div>
-        <div class="muted" id="captions-detail"></div>
-        <ul id="captions-list"></ul>
-      </div>
-    </div>
-    <p class="muted" id="perf"></p>
-    <details><summary>Raw report</summary><pre id="raw"></pre></details>
-  </section>
+  <div id="answers" class="answers"></div>
+  <details id="raw-wrap" hidden><summary>Raw response</summary><pre id="raw"></pre></details>
 </main>
 <script type="module" src="main.js"></script>
 </body>

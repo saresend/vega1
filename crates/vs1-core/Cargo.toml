@@ -1,6 +1,6 @@
 [package]
 name = "vs1-core"
-description = "On-device video question answering: detection, tracking, caption and container analysis"
+description = "General on-device System One model for video: typed questions in, calibrated answers out"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,5 +8,10 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+indexmap = { version = "2", features = ["serde"] }
+safetensors = "0.4"
 serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+# unstable_wasm swaps the C regex engine for a pure-Rust one so this builds for wasm32.
+tokenizers = { version = "0.21", default-features = false, features = ["unstable_wasm"] }
 tract-onnx.workspace = true

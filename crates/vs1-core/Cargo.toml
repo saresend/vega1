@@ -1,0 +1,12 @@
+[package]
+name = "vs1-core"
+description = "On-device video question answering: detection, tracking, caption and container analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+tract-onnx.workspace = true

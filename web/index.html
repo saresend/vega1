@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Video System 1</title>
+  <style>
+    :root {
+      --bg: #f7f7f5; --fg: #1c1c1c; --muted: #6b6b6b; --card: #ffffff; --border: #e2e2de; --accent: #2f5bd3;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #151515; --fg: #ececec; --muted: #9a9a9a; --card: #1f1f1f; --border: #333; --accent: #7aa2ff; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+    main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    .muted { color: var(--muted); }
+    .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 16px 0; }
+    .stage { position: relative; background: #000; border-radius: 8px; overflow: hidden; }
+    .stage video, .stage canvas { display: block; width: 100%; height: auto; }
+    .stage canvas { position: absolute; inset: 0; height: 100%; }
+    progress { width: 100%; margin: 8px 0 4px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin-top: 20px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+    .card h2 { font-size: 14px; font-weight: 600; margin: 0; color: var(--muted); }
+    .value { font-size: 40px; font-weight: 700; line-height: 1.2; color: var(--accent); }
+    .card ul { margin: 8px 0 0; padding-left: 18px; font-size: 13px; }
+    details { margin-top: 16px; }
+    pre { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; overflow: auto; font-size: 12px; }
+    button { font: inherit; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Video System 1</h1>
+  <div class="muted">Runs entirely in your browser (Rust → WebAssembly). Your video never leaves this page.</div>
+
+  <div class="controls">
+    <input type="file" id="file" accept="video/*" disabled>
+    <label>Sample rate
+      <select id="fps">
+        <option value="1">1 fps</option>
+        <option value="2" selected>2 fps</option>
+        <option value="4">4 fps</option>
+      </select>
+    </label>
+    <button id="cancel" hidden>Cancel</button>
+  </div>
+
+  <div class="stage">
+    <video id="video" muted playsinline></video>
+    <canvas id="overlay"></canvas>
+  </div>
+  <progress id="progress" value="0" max="1"></progress>
+  <div id="status" class="muted">Starting…</div>
+
+  <section id="results" hidden>
+    <div class="grid">
+      <div class="card">
+        <h2>How many subjects are there throughout the video?</h2>
+        <div class="value" id="subjects-value"></div>
+        <div class="muted" id="subjects-detail"></div>
+        <ul id="subjects-list"></ul>
+      </div>
+      <div class="card">
+        <h2>Is the video captioned?</h2>
+        <div class="value" id="captions-value"></div>
+        <div class="muted" id="captions-detail"></div>
+        <ul id="captions-list"></ul>
+      </div>
+    </div>
+    <p class="muted" id="perf"></p>
+    <details><summary>Raw report</summary><pre id="raw"></pre></details>
+  </section>
+</main>
+<script type="module" src="main.js"></script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+/target
+/testdata
+/web/pkg
+/web/models
+/models
+/train/.venv
+/train/data
+__pycache__/

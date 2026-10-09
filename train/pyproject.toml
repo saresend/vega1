@@ -1,0 +1,21 @@
+[project]
+name = "vs1-train"
+version = "0.1.0"
+description = "Teacher labeling, feature extraction and answer-head training for video-system1"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0",
+    "onnx>=1.17",
+    "onnxruntime>=1.20",
+    "tokenizers>=0.21",
+    "torch>=2.6",
+]
+
+# No GPU on the dev box: CPU wheels avoid ~2.5 GB of CUDA libraries.
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

@@ -6,3 +6,5 @@
 /train/.venv
 /train/data
 __pycache__/
+/web/questions.json
+/train/data_build.log

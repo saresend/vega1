@@ -3,7 +3,8 @@
 //!
 //!   vs1 evaluate <video> --questions q.json [--frames 16] [--head h.safetensors]
 //!   vs1 embed-video <video>... --out-dir DIR [--frames 16]     # [T, 512] f32 .npy per video
-//!   vs1 embed-questions q.json                                  # JSON embeddings for training
+//!   vs1 embed-questions questions.jsonl --out-dir DIR           # deduplicated text embeddings
+//!   vs1 check-head head.safetensors parity.json                 # Rust vs Python head outputs
 //!
 //! Common: --models DIR (default: models/vs1 in the repo)
 
@@ -12,7 +13,8 @@ use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{bail, ensure, Context};
-use vs1_core::api::Request;
+use vs1_core::api::{Question, Request};
+use vs1_core::head::Head;
 use vs1_core::{Frame, ModelFiles, SystemOne};
 
 const DEFAULT_MODELS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../models/vs1");
@@ -21,7 +23,8 @@ const MAX_ANALYSIS_WIDTH: usize = 640;
 const USAGE: &str = "usage:
   vs1 evaluate <video> --questions q.json [--frames 16] [--head h.safetensors] [--models DIR]
   vs1 embed-video <video>... --out-dir DIR [--frames 16] [--models DIR]
-  vs1 embed-questions <q.json> [--models DIR]";
+  vs1 embed-questions <questions.jsonl> --out-dir DIR [--models DIR]
+  vs1 check-head <head.safetensors> <parity.json>";
 
 struct Args {
     command: String,
@@ -176,15 +179,54 @@ fn main() -> anyhow::Result<()> {
             }
         }
         "embed-questions" => {
+            // One Jev question per line. Writes texts.npy (unique text
+            // embeddings) and index.jsonl (per question: question row,
+            // option rows), so shared options are embedded once.
             let [path] = args.positional.as_slice() else { bail!("embed-questions takes one file\n{USAGE}") };
-            let request = read_request(path)?;
+            let out_dir = args.out_dir.context("--out-dir is required")?;
+            std::fs::create_dir_all(&out_dir)?;
             let mut model = load_model(&args.models, None)?;
-            let mut out = serde_json::Map::new();
-            for (key, q) in &request.questions {
-                let (question, options, _) = model.embed_question(q)?;
-                out.insert(key.clone(), serde_json::json!({ "question": question, "options": options }));
+            let mut rows: Vec<Vec<f32>> = Vec::new();
+            let mut seen: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+            let mut index = String::new();
+            let start = Instant::now();
+            let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+            for (line_no, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+                let q: Question = serde_json::from_str(line).with_context(|| format!("line {}", line_no + 1))?;
+                let prompts = vs1_core::prompts::build(&q);
+                let mut row_of = |context: &str, focus: &str| -> anyhow::Result<usize> {
+                    let key = (context.to_string(), focus.to_string());
+                    if let Some(&i) = seen.get(&key) {
+                        return Ok(i);
+                    }
+                    rows.push(model.embed_text(context, focus)?.0);
+                    seen.insert(key, rows.len() - 1);
+                    Ok(rows.len() - 1)
+                };
+                let question = row_of("", &prompts.question)?;
+                let options = prompts.options.iter().map(|o| row_of(&o.context, &o.focus)).collect::<anyhow::Result<Vec<_>>>()?;
+                index.push_str(&serde_json::json!({ "question": question, "options": options }).to_string());
+                index.push('\n');
             }
-            println!("{}", serde_json::Value::Object(out));
+            write_npy(&out_dir.join("texts.npy"), &rows)?;
+            std::fs::write(out_dir.join("index.jsonl"), index)?;
+            eprintln!("{} unique texts in {:.1} s", rows.len(), start.elapsed().as_secs_f64());
+        }
+        "check-head" => {
+            let [head_path, parity_path] = args.positional.as_slice() else { bail!("check-head takes two files\n{USAGE}") };
+            let head = Head::Trained(vs1_core::head::TrainedHead::from_safetensors(&std::fs::read(head_path)?)?);
+            let cases: Vec<serde_json::Value> = serde_json::from_str(&std::fs::read_to_string(parity_path)?)?;
+            let floats = |v: &serde_json::Value| -> Vec<f32> { v.as_array().into_iter().flatten().filter_map(|x| x.as_f64()).map(|x| x as f32).collect() };
+            let rows = |v: &serde_json::Value| -> Vec<Vec<f32>> { v.as_array().into_iter().flatten().map(floats).collect() };
+            let mut worst = 0.0f32;
+            for case in &cases {
+                let probs = head.probabilities(&rows(&case["frames"]), &floats(&case["question"]), &rows(&case["options"]));
+                for (a, b) in probs.iter().zip(floats(&case["probabilities"])) {
+                    worst = worst.max((a - b).abs());
+                }
+            }
+            println!("{} cases, max |rust - python| probability difference = {worst:.2e}", cases.len());
+            ensure!(worst < 1e-3, "head parity check failed");
         }
         other => bail!("unknown command `{other}`\n{USAGE}"),
     }

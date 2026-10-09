@@ -86,7 +86,7 @@ impl SystemOne {
         self.image.embed(frame)
     }
 
-    fn embed_text(&mut self, context: &str, focus: &str) -> anyhow::Result<(Vec<f32>, usize)> {
+    pub fn embed_text(&mut self, context: &str, focus: &str) -> anyhow::Result<(Vec<f32>, usize)> {
         let key = (context.to_string(), focus.to_string());
         if let Some(hit) = self.text_cache.get(&key) {
             return Ok(hit.clone());

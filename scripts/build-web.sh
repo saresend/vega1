@@ -18,7 +18,9 @@ for f in vision_fp16w.onnx text_fp16w.onnx tokenizer.json LICENSE-mobileclip; do
   cp models/vs1/$f web/models/
 done
 if [[ -f models/vs1/head.safetensors ]]; then
-  cp models/vs1/head.safetensors web/models/
+  # Half-size copy for the page (the head still computes in f32).
+  uv run --project train python scripts/half-head.py models/vs1/head.safetensors web/models/head.safetensors
 fi
-cp examples/questions.json web/questions.json
+# Sample videos for the demo (not committed): python3 scripts/fetch-samples.py
+[[ -f web/samples/samples.json ]] || echo "tip: run scripts/fetch-samples.py to add the demo's sample videos"
 ls -la web/pkg web/models

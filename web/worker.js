@@ -1,6 +1,6 @@
 // Runs the WASM model off the main thread. Protocol:
 // main → { id, type, ...payload }, worker → { id, ok, result | error, status }.
-import init, { SystemOne } from './pkg/vs1_wasm.js';
+import init, { FrameEmbedder, SystemOne } from './pkg/vs1_wasm.js';
 
 const CACHE = 'vs1-models-v1';
 const FILES = { vision: 'models/vision_fp16w.onnx', text: 'models/text_fp16w.onnx', tokenizer: 'models/tokenizer.json' };
@@ -30,19 +30,33 @@ async function fetchBytes(url) {
 }
 
 const handlers = {
-  async init({ baseUrl, head }) {
+  // role "main": the answer head now, the encoders when asked (loadText,
+  // loadVision); role "embed": the vision encoder only, for parallel frames.
+  async init({ baseUrl, head, role = 'main' }) {
     const t0 = performance.now();
     await init();
-    const url = (path) => new URL(path, baseUrl).href;
-    const [vision, text, tokenizer, headBytes] = await Promise.all([
-      fetchBytes(url(FILES.vision)),
-      fetchBytes(url(FILES.text)),
-      fetchBytes(url(FILES.tokenizer)),
-      head ? fetchBytes(new URL(head, baseUrl).href) : Promise.resolve(new Uint8Array()),
+    self.baseUrl = baseUrl;
+    if (role === 'embed') {
+      model = new FrameEmbedder(await fetchBytes(new URL(FILES.vision, baseUrl).href));
+      return { ms: performance.now() - t0 };
+    }
+    const headBytes = head ? await fetchBytes(new URL(head, baseUrl).href) : new Uint8Array();
+    model = new SystemOne(headBytes);
+    return { model: model.modelName, ms: performance.now() - t0 };
+  },
+  async loadText() {
+    const t0 = performance.now();
+    const [text, tokenizer] = await Promise.all([
+      fetchBytes(new URL(FILES.text, self.baseUrl).href),
+      fetchBytes(new URL(FILES.tokenizer, self.baseUrl).href),
     ]);
-    const t1 = performance.now();
-    model = new SystemOne(vision, text, tokenizer, headBytes);
-    return { model: model.modelName, downloadMs: t1 - t0, loadMs: performance.now() - t1 };
+    model.loadText(text, tokenizer);
+    return { ms: performance.now() - t0 };
+  },
+  async loadVision() {
+    const t0 = performance.now();
+    model.loadVision(await fetchBytes(new URL(FILES.vision, self.baseUrl).href));
+    return { ms: performance.now() - t0 };
   },
   validate({ request }) {
     try {
@@ -52,14 +66,26 @@ const handlers = {
     }
     return {};
   },
-  clear() {
-    model.clearFrames();
+  // One frame's rows (full view, then crops if asked), flattened.
+  embed({ rgba, width, height, crops }) {
+    return model.embedFrame(new Uint8Array(rgba), width, height, crops);
+  },
+  // Parallel text encoding: the main worker lists what a request still needs,
+  // every worker encodes a share, the main worker caches the results.
+  missingTexts({ request }) {
+    try {
+      return JSON.parse(model.missingTexts(request));
+    } catch (err) {
+      throw Object.assign(err, { status: 422 });
+    }
+  },
+  insertTexts({ texts, embedded }) {
+    texts.forEach(([context, focus], i) => model.insertText(context, focus, embedded[i]));
     return {};
   },
-  frame({ rgba, width, height }) {
-    const t0 = performance.now();
-    model.pushFrame(new Uint8Array(rgba), width, height);
-    return { ms: performance.now() - t0 };
+  setState({ full, crops }) {
+    model.setState(full, crops);
+    return {};
   },
   evaluate({ request }) {
     return JSON.parse(model.evaluate(request));

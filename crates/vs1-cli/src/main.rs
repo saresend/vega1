@@ -3,6 +3,8 @@
 //!
 //!   vs1 evaluate <video> --questions q.json [--frames 16] [--head h.safetensors]
 //!   vs1 embed-video <video>... --out-dir DIR [--frames 16]     # [T, 512] f32 .npy per video
+//!   vs1 embed-video <video>... --out-dir DIR --crops-only       # crops of the crop frames: <stem>.crops.npy
+//!   vs1 embed-state <video> --out rows.f32 [--frames 16]        # a video state for the web page (full rows, then crops)
 //!   vs1 embed-questions questions.jsonl --out-dir DIR           # deduplicated text embeddings
 //!   vs1 check-head head.safetensors parity.json                 # Rust vs Python head outputs
 //!
@@ -21,9 +23,11 @@ const DEFAULT_MODELS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../models/
 const MAX_ANALYSIS_WIDTH: usize = 640;
 
 const USAGE: &str = "usage:
-  vs1 evaluate <video> --questions q.json [--frames 16] [--head h.safetensors] [--models DIR]
-  vs1 embed-video <video>... --out-dir DIR [--frames 16] [--models DIR]
+  vs1 evaluate <video> --questions q.json [--frames 16] [--crop-frames 4] [--head h.safetensors] [--models DIR]
+  vs1 embed-video <video>... --out-dir DIR [--frames 16] [--crops-only [--crop-frames 4]] [--models DIR]
+  vs1 embed-state <video> --out rows.f32 [--frames 16] [--crop-frames 4] [--models DIR]
   vs1 embed-questions <questions.jsonl> --out-dir DIR [--models DIR]
+  vs1 embed-texts <statements.json> --out texts.f32 [--models DIR]
   vs1 check-head <head.safetensors> <parity.json>";
 
 struct Args {
@@ -31,9 +35,13 @@ struct Args {
     positional: Vec<PathBuf>,
     questions: Option<PathBuf>,
     frames: usize,
+    /// Frames that also get crop embeddings (`vs1_core::crop_frame_indices`).
+    crop_frames: usize,
+    crops_only: bool,
     head: Option<PathBuf>,
     models: PathBuf,
     out_dir: Option<PathBuf>,
+    out: Option<PathBuf>,
 }
 
 fn parse_args() -> anyhow::Result<Args> {
@@ -48,18 +56,24 @@ fn parse_args() -> anyhow::Result<Args> {
         positional: Vec::new(),
         questions: None,
         frames: 16,
+        crop_frames: vs1_core::CROP_FRAMES,
+        crops_only: false,
         head: None,
         models: PathBuf::from(DEFAULT_MODELS),
         out_dir: None,
+        out: None,
     };
     while let Some(a) = it.next() {
         let mut value = || it.next().with_context(|| format!("{a} needs a value"));
         match a.as_str() {
             "--questions" => args.questions = Some(value()?.into()),
             "--frames" => args.frames = value()?.parse()?,
+            "--crop-frames" => args.crop_frames = value()?.parse()?,
+            "--crops-only" => args.crops_only = true,
             "--head" => args.head = Some(value()?.into()),
             "--models" => args.models = value()?.into(),
             "--out-dir" => args.out_dir = Some(value()?.into()),
+            "--out" => args.out = Some(value()?.into()),
             _ if a.starts_with("--") => bail!("unknown flag {a}\n{USAGE}"),
             _ => args.positional.push(a.into()),
         }
@@ -73,17 +87,17 @@ fn load_model(models: &Path, head: Option<&Path>) -> anyhow::Result<SystemOne> {
     let head = head.map(|p| std::fs::read(p).with_context(|| format!("reading {}", p.display()))).transpose()?;
     let start = Instant::now();
     let model = SystemOne::new(ModelFiles {
-        vision_onnx: &read("vision.onnx")?,
-        text_onnx: &read("text.onnx")?,
-        tokenizer_json: &read("tokenizer.json")?,
+        vision_onnx: Some(&read("vision.onnx")?),
+        text: Some((&read("text.onnx")?, &read("tokenizer.json")?)),
         head: head.as_deref(),
     })?;
     eprintln!("loaded {} in {:.0} ms", model.model_name(), start.elapsed().as_secs_f64() * 1e3);
     Ok(model)
 }
 
-/// Uniformly sampled RGBA frames: T frames at the midpoints of T equal spans.
-fn sample_frames(video: &Path, count: usize) -> anyhow::Result<(Vec<Vec<u8>>, usize, usize)> {
+/// Uniformly sampled RGBA frames: T frames at the midpoints of T equal spans
+/// (only those at `only` indices, if given).
+fn sample_frames(video: &Path, count: usize, only: Option<&[usize]>) -> anyhow::Result<(Vec<Vec<u8>>, usize, usize)> {
     let out = Command::new("ffprobe")
         .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height:format=duration"])
         .args(["-of", "json"])
@@ -99,7 +113,7 @@ fn sample_frames(video: &Path, count: usize) -> anyhow::Result<(Vec<Vec<u8>>, us
     let height = ((src_h as f64 * width as f64 / src_w as f64 / 2.0).round() as usize * 2).max(2);
 
     let mut frames = Vec::with_capacity(count);
-    for i in 0..count {
+    for i in (0..count).filter(|i| only.is_none_or(|o| o.contains(i))) {
         let t = (i as f64 + 0.5) * duration / count as f64;
         let out = Command::new("ffmpeg")
             .args(["-v", "error", "-ss", &format!("{t:.3}"), "-i"])
@@ -116,17 +130,43 @@ fn sample_frames(video: &Path, count: usize) -> anyhow::Result<(Vec<Vec<u8>>, us
     Ok((frames, width, height))
 }
 
-fn embed_video(model: &SystemOne, video: &Path, count: usize) -> anyhow::Result<Vec<Vec<f32>>> {
-    let (frames, w, h) = sample_frames(video, count)?;
+/// The video state's embedding rows: every sampled frame's full view, plus
+/// crops of `crop_frames` of them (as the browser computes it). Also returns
+/// the number of frames decoded.
+fn embed_video(model: &SystemOne, video: &Path, count: usize, crop_frames: usize) -> anyhow::Result<(Vec<Vec<f32>>, usize)> {
+    let (frames, w, h) = sample_frames(video, count, None)?;
     let start = Instant::now();
-    let embeddings = frames.iter().map(|rgba| model.embed_frame(&Frame::new(rgba, w, h)?)).collect::<anyhow::Result<Vec<_>>>()?;
+    let with_crops = vs1_core::crop_frame_indices(frames.len(), crop_frames);
+    // Full views first, then crops (the order `SystemOne::answer` expects).
+    let mut rows = Vec::new();
+    let mut crops = Vec::new();
+    for (i, rgba) in frames.iter().enumerate() {
+        let frame = Frame::new(rgba, w, h)?;
+        rows.push(model.vision()?.embed(&frame)?);
+        if with_crops.contains(&i) {
+            crops.extend(model.vision()?.embed_crops(&frame)?);
+        }
+    }
+    rows.extend(crops);
     eprintln!(
-        "{}: {} frames at {w}x{h}, {:.0} ms/frame",
+        "{}: {} frames at {w}x{h} → {} rows, {:.0} ms/row",
         video.display(),
-        embeddings.len(),
-        start.elapsed().as_secs_f64() * 1e3 / embeddings.len() as f64
+        frames.len(),
+        rows.len(),
+        start.elapsed().as_secs_f64() * 1e3 / rows.len() as f64
     );
-    Ok(embeddings)
+    Ok((rows, frames.len()))
+}
+
+/// Only the crop rows (training stores them next to the full-frame rows).
+fn embed_crops(model: &SystemOne, video: &Path, count: usize, crop_frames: usize) -> anyhow::Result<Vec<Vec<f32>>> {
+    let idx = vs1_core::crop_frame_indices(count, crop_frames);
+    let (frames, w, h) = sample_frames(video, count, Some(&idx))?;
+    let mut rows = Vec::new();
+    for rgba in &frames {
+        rows.extend(model.vision()?.embed_crops(&Frame::new(rgba, w, h)?)?);
+    }
+    Ok(rows)
 }
 
 /// Minimal .npy (v1.0) writer for a 2-D little-endian f32 array.
@@ -158,8 +198,8 @@ fn main() -> anyhow::Result<()> {
             let request = read_request(args.questions.as_deref().context("--questions is required")?)?;
             let mut model = load_model(&args.models, args.head.as_deref())?;
             let compiled = model.compile(&request)?;
-            let frames = embed_video(&model, video, args.frames)?;
-            println!("{}", serde_json::to_string_pretty(&model.answer(&frames, &compiled)?)?);
+            let (rows, frames) = embed_video(&model, video, args.frames, args.crop_frames)?;
+            println!("{}", serde_json::to_string_pretty(&model.answer(&rows, frames, &compiled)?)?);
         }
         "embed-video" => {
             ensure!(!args.positional.is_empty(), "embed-video needs at least one video\n{USAGE}");
@@ -168,15 +208,60 @@ fn main() -> anyhow::Result<()> {
             let model = load_model(&args.models, None)?;
             for video in &args.positional {
                 let stem = video.file_stem().context("video path has no file name")?;
-                let dest = out_dir.join(stem).with_extension("npy");
+                let name = format!("{}{}", stem.to_string_lossy(), if args.crops_only { ".crops.npy" } else { ".npy" });
+                let dest = out_dir.join(name);
                 if dest.exists() {
                     continue;
                 }
-                match embed_video(&model, video, args.frames) {
-                    Ok(frames) => write_npy(&dest, &frames)?,
+                let rows = if args.crops_only {
+                    embed_crops(&model, video, args.frames, args.crop_frames)
+                } else {
+                    embed_video(&model, video, args.frames, 0).map(|(rows, _)| rows)
+                };
+                match rows {
+                    Ok(rows) => write_npy(&dest, &rows)?,
                     Err(e) => eprintln!("skipping {}: {e:#}", video.display()),
                 }
             }
+        }
+        "embed-state" => {
+            // Raw little-endian f32 rows, exactly what the page computes for
+            // the video: one full view per frame, then the crop rows.
+            let [video] = args.positional.as_slice() else { bail!("embed-state takes one video\n{USAGE}") };
+            let out = args.out.context("--out is required")?;
+            let model = load_model(&args.models, None)?;
+            let (rows, frames) = embed_video(&model, video, args.frames, args.crop_frames)?;
+            let bytes: Vec<u8> = rows.iter().flatten().flat_map(|x| x.to_le_bytes()).collect();
+            std::fs::write(&out, bytes).with_context(|| format!("writing {}", out.display()))?;
+            println!("{}", serde_json::json!({ "frames": frames, "rows": rows.len() }));
+        }
+        "embed-texts" => {
+            // Text embeddings for a JSON list of yes/no statements, for the web
+            // page to answer them before its text encoder downloads: 513 floats
+            // per text (embedding, then token count) in texts.f32, and the
+            // (context, focus) keys in texts.json next to it.
+            let [path] = args.positional.as_slice() else { bail!("embed-texts takes one file\n{USAGE}") };
+            let out = args.out.context("--out is required")?;
+            let statements: Vec<String> = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+            let questions: serde_json::Map<String, serde_json::Value> = statements
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (format!("s{i}"), serde_json::json!({ "type": "noul", "instructions": s })))
+                .collect();
+            let request = Request::parse(&serde_json::json!({ "questions": questions }).to_string())
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut model = load_model(&args.models, None)?;
+            let keys = model.missing_texts(&request)?;
+            let mut floats = Vec::with_capacity(keys.len() * 513);
+            for (context, focus) in &keys {
+                let (emb, tokens) = model.embed_text(context, focus)?;
+                floats.extend(emb);
+                floats.push(tokens as f32);
+            }
+            let bytes: Vec<u8> = floats.iter().flat_map(|x| x.to_le_bytes()).collect();
+            std::fs::write(&out, bytes)?;
+            std::fs::write(out.with_extension("json"), serde_json::to_string(&keys)?)?;
+            println!("{}", serde_json::json!({ "texts": keys.len() }));
         }
         "embed-questions" => {
             // One Jev question per line. Writes texts.npy (unique text
@@ -205,7 +290,9 @@ fn main() -> anyhow::Result<()> {
                 };
                 let question = row_of("", &prompts.question)?;
                 let options = prompts.options.iter().map(|o| row_of(&o.context, &o.focus)).collect::<anyhow::Result<Vec<_>>>()?;
-                index.push_str(&serde_json::json!({ "question": question, "options": options }).to_string());
+                index.push_str(
+                    &serde_json::json!({ "question": question, "options": options, "negated": prompts.negated }).to_string(),
+                );
                 index.push('\n');
             }
             write_npy(&out_dir.join("texts.npy"), &rows)?;
@@ -220,7 +307,9 @@ fn main() -> anyhow::Result<()> {
             let rows = |v: &serde_json::Value| -> Vec<Vec<f32>> { v.as_array().into_iter().flatten().map(floats).collect() };
             let mut worst = 0.0f32;
             for case in &cases {
-                let probs = head.probabilities(&rows(&case["frames"]), &floats(&case["question"]), &rows(&case["options"]));
+                let frames = rows(&case["frames"]);
+                let n_full = case["n_full"].as_u64().map_or(frames.len(), |n| n as usize);
+                let probs = head.probabilities(&frames, n_full, &floats(&case["question"]), &rows(&case["options"]));
                 for (a, b) in probs.iter().zip(floats(&case["probabilities"])) {
                     worst = worst.max((a - b).abs());
                 }

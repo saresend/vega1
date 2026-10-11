@@ -4,6 +4,15 @@
 
 use anyhow::ensure;
 
+/// A rectangle within a frame, in pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Region {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
 /// An RGBA8 frame borrowed from the caller.
 #[derive(Clone, Copy)]
 pub struct Frame<'a> {
@@ -30,14 +39,42 @@ impl<'a> Frame<'a> {
         [self.rgba[i] as f32, self.rgba[i + 1] as f32, self.rgba[i + 2] as f32]
     }
 
-    /// CLIP-style input: resize the shortest side to `size`, centre-crop to
-    /// `size`x`size`, scale to 0..1, planar CHW. Downscaling averages each
-    /// output pixel's source footprint (area resampling) to avoid aliasing;
-    /// upscaling falls back to bilinear.
+    /// The whole frame as a region.
+    pub fn full(&self) -> Region {
+        Region { x: 0, y: 0, width: self.width, height: self.height }
+    }
+
+    /// Six square crops on a 3x2 grid (2x3 for portrait) that together cover
+    /// the whole frame, including the sides the full view's centre crop drops.
+    /// Each is half the short side (a third of the long side if larger, so
+    /// three span it): small objects appear at up to twice the full view's scale.
+    pub fn crop_regions(&self) -> Vec<Region> {
+        let (short, long) = (self.width.min(self.height), self.width.max(self.height));
+        let side = (short / 2).max(long.div_ceil(3)).min(short).max(1);
+        let (cols, rows) = if self.width >= self.height { (3, 2) } else { (2, 3) };
+        let spread = |extent: usize, n: usize, i: usize| if n == 1 { 0 } else { (extent - side) * i / (n - 1) };
+        let mut out = Vec::with_capacity(cols * rows);
+        for r in 0..rows {
+            for c in 0..cols {
+                out.push(Region { x: spread(self.width, cols, c), y: spread(self.height, rows, r), width: side, height: side });
+            }
+        }
+        out
+    }
+
+    /// CLIP-style input for the whole frame (see [`Frame::region_to_clip_input`]).
     pub fn to_clip_input(&self, size: usize) -> Vec<f32> {
-        let side = self.width.min(self.height) as f32;
-        let x0 = (self.width as f32 - side) / 2.0;
-        let y0 = (self.height as f32 - side) / 2.0;
+        self.region_to_clip_input(self.full(), size)
+    }
+
+    /// CLIP-style input for a region: resize its shortest side to `size`,
+    /// centre-crop to `size`x`size`, scale to 0..1, planar CHW. Downscaling
+    /// averages each output pixel's source footprint (area resampling) to
+    /// avoid aliasing; upscaling falls back to bilinear.
+    pub fn region_to_clip_input(&self, region: Region, size: usize) -> Vec<f32> {
+        let side = region.width.min(region.height) as f32;
+        let x0 = region.x as f32 + (region.width as f32 - side) / 2.0;
+        let y0 = region.y as f32 + (region.height as f32 - side) / 2.0;
         let step = side / size as f32;
         let plane = size * size;
         let mut out = vec![0.0f32; 3 * plane];
@@ -119,6 +156,32 @@ mod tests {
         assert_eq!(&out[0..4], &[0.0; 4], "red plane");
         assert_eq!(&out[4..8], &[1.0; 4], "green plane");
         assert_eq!(&out[8..12], &[0.0; 4], "blue plane");
+    }
+
+    #[test]
+    fn crops_tile_the_frame_at_half_scale() {
+        let px = vec![0u8; 640 * 360 * 4];
+        let crops = Frame::new(&px, 640, 360).unwrap().crop_regions();
+        assert_eq!(crops.len(), 6);
+        assert!(crops.iter().all(|r| r.width == 214 && r.height == 214 && r.x + 214 <= 640 && r.y + 214 <= 360));
+        assert_eq!((crops[0].x, crops[1].x, crops[2].x, crops[5].y), (0, 213, 426, 146));
+        // Every pixel is covered.
+        let covered = |x: usize, y: usize| crops.iter().any(|r| (r.x..r.x + r.width).contains(&x) && (r.y..r.y + r.height).contains(&y));
+        assert!((0..640).all(|x| (0..360).all(|y| covered(x, y))));
+        // 4:3 portrait: half the short side.
+        let px = vec![0u8; 240 * 320 * 4];
+        let crops = Frame::new(&px, 240, 320).unwrap().crop_regions();
+        assert_eq!((crops.len(), crops[5].width, crops[5].x, crops[5].y), (6, 120, 120, 200));
+    }
+
+    #[test]
+    fn region_input_reads_only_the_region() {
+        // Left half red, right half blue; the right-half region is all blue.
+        let (w, h) = (8, 4);
+        let px: Vec<u8> = (0..w * h).flat_map(|i| if i % w < 4 { [255, 0, 0, 255] } else { [0, 0, 255, 255] }).collect();
+        let f = Frame::new(&px, w, h).unwrap();
+        let out = f.region_to_clip_input(Region { x: 4, y: 0, width: 4, height: 4 }, 2);
+        assert_eq!((&out[0..4], &out[8..12]), (&[0.0; 4][..], &[1.0; 4][..]));
     }
 
     #[test]

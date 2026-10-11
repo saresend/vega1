@@ -5,8 +5,11 @@
 //!   over frames with a log-mean-exp (a soft max), so evidence present in only
 //!   some frames still counts.
 //! * Trained: a small question-conditioned attention head over frames whose
-//!   output is added to the (learned-scale) zero-shot logits. With `gamma = 0`
-//!   it reduces exactly to zero-shot, which is how training starts.
+//!   output is added to the zero-shot logits, which it also rescales per
+//!   question (`s = 1 + 2 tanh(w·x)`, x the attention output or the question
+//!   embedding: trust, discount or flip the zero-shot evidence, e.g. for
+//!   negated statements). With `gamma = 0` and `w = 0` it reduces exactly to
+//!   zero-shot, which is how training starts.
 //!
 //! The trained head runs in plain Rust (it's ~1M parameters) and is mirrored
 //! exactly by `train/head.py`; weights load from safetensors.
@@ -34,6 +37,10 @@ pub fn pooled_similarity(frames: &[Vec<f32>], option: &[f32], beta: f32) -> f32 
     (max + mean_exp.ln()) / beta
 }
 
+fn add(a: &[f32], b: &[f32]) -> Vec<f32> {
+    a.iter().zip(b).map(|(x, y)| x + y).collect()
+}
+
 pub fn softmax(logits: &[f32]) -> Vec<f32> {
     let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let exps: Vec<f32> = logits.iter().map(|l| (l - max).exp()).collect();
@@ -55,6 +62,25 @@ impl Linear {
     }
 }
 
+/// Input of the zero-shot scale: the attention output (`ws`/`bs`) or the
+/// question embedding (`wsq`/`bsq`).
+enum Scale {
+    Hidden(Linear),
+    Question(Linear),
+}
+
+/// Crop handling (heads trained with crop rows): the weights of the crop
+/// soft-max and mean similarity terms, and optionally full/crop type vectors
+/// added to rows so attention also runs over crops. Heads without it ignore
+/// crop rows.
+struct Crops {
+    /// (full, crop) type vectors; without them attention sees full views only.
+    types: Option<(Vec<f32>, Vec<f32>)>,
+    a_peak: f32,
+    a_mean: f32,
+    beta: f32,
+}
+
 pub struct TrainedHead {
     pub name: String,
     wq: Linear,
@@ -65,9 +91,30 @@ pub struct TrainedHead {
     w1: Linear,
     w2: Linear,
     wz: Linear,
+    /// Per-question zero-shot scale; absent in older heads (scale 1).
+    scale: Option<Scale>,
+    crops: Option<Crops>,
     a_zs: f32,
     gamma: f32,
     pool_beta: f32,
+}
+
+/// IEEE 754 half → single precision.
+fn f16_to_f32(h: u16) -> f32 {
+    let sign = ((h >> 15) as u32) << 31;
+    let exp = ((h >> 10) & 0x1f) as u32;
+    let frac = (h & 0x3ff) as u32;
+    let bits = match exp {
+        0 if frac == 0 => sign,
+        0 => {
+            // Subnormal: normalise.
+            let shift = frac.leading_zeros() - 21;
+            sign | ((113 - shift) << 23) | ((frac << (shift + 1)) & 0x3ff) << 13
+        }
+        0x1f => sign | 0x7f80_0000 | (frac << 13),
+        _ => sign | ((exp + 112) << 23) | (frac << 13),
+    };
+    f32::from_bits(bits)
 }
 
 fn gelu_tanh(x: f32) -> f32 {
@@ -85,11 +132,13 @@ impl TrainedHead {
             .unwrap_or_else(|| "vs1-head".to_string());
         let tensor = |key: &str, shape: &[usize]| -> anyhow::Result<Vec<f32>> {
             let t = st.tensor(key).with_context(|| format!("head is missing `{key}`"))?;
-            if t.dtype() != Dtype::F32 {
-                bail!("`{key}` must be f32, got {:?}", t.dtype());
-            }
             ensure!(t.shape() == shape, "`{key}` has shape {:?}, expected {shape:?}", t.shape());
-            Ok(t.data().chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
+            match t.dtype() {
+                Dtype::F32 => Ok(t.data().chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()),
+                // Half-size heads for the web; computation stays in f32.
+                Dtype::F16 => Ok(t.data().chunks_exact(2).map(|b| f16_to_f32(u16::from_le_bytes([b[0], b[1]]))).collect()),
+                other => bail!("`{key}` must be f32 or f16, got {other:?}"),
+            }
         };
         let hidden = st.tensor("bq").context("head is missing `bq`")?.shape()[0];
         let mlp = st.tensor("b1").context("head is missing `b1`")?.shape()[0];
@@ -107,21 +156,58 @@ impl TrainedHead {
             w1: linear("w1", "b1", mlp, hidden)?,
             w2: linear("w2", "b2", hidden, mlp)?,
             wz: linear("wz", "bz", EMBED_DIM, hidden)?,
+            scale: if st.names().contains(&&"ws".to_string()) {
+                Some(Scale::Hidden(linear("ws", "bs", 1, hidden)?))
+            } else if st.names().contains(&&"wsq".to_string()) {
+                Some(Scale::Question(linear("wsq", "bsq", 1, EMBED_DIM)?))
+            } else {
+                None
+            },
+            crops: if st.names().contains(&&"a_crop".to_string()) {
+                let a = tensor("a_crop", &[2])?;
+                Some(Crops {
+                    types: if st.names().contains(&&"type_crop".to_string()) {
+                        Some((tensor("type_full", &[EMBED_DIM])?, tensor("type_crop", &[EMBED_DIM])?))
+                    } else {
+                        None
+                    },
+                    a_peak: a[0],
+                    a_mean: a[1],
+                    beta: scalar("crop_beta")?,
+                })
+            } else {
+                None
+            },
             a_zs: scalar("a_zs")?,
             gamma: scalar("gamma")?,
             pool_beta: scalar("pool_beta")?,
         })
     }
 
-    fn logits(&self, frames: &[Vec<f32>], question: &[f32], options: &[Vec<f32>]) -> Vec<f32> {
+    /// Per-video work shared by every question: rows tagged with their type
+    /// (or, without crop support, the full views only) through `wk` and `wv`.
+    fn project(&self, full: &[Vec<f32>], crop: &[Vec<f32>]) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+        let typed: Vec<Vec<f32>> = match self.crops.as_ref().and_then(|c| c.types.as_ref()) {
+            Some((type_full, type_crop)) => full
+                .iter()
+                .map(|r| add(r, type_full))
+                .chain(crop.iter().map(|r| add(r, type_crop)))
+                .collect(),
+            None => full.to_vec(),
+        };
+        (typed.iter().map(|r| self.wk.forward(r)).collect(), typed.iter().map(|r| self.wv.forward(r)).collect())
+    }
+
+    fn logits(&self, video: &Prepared, question: &[f32], options: &[Vec<f32>]) -> Vec<f32> {
+        let (full, crop) = (video.full, video.crop);
         let hidden = self.ln_g.len();
         let qh = self.wq.forward(question);
         let scale = 1.0 / (hidden as f32).sqrt();
-        let keys: Vec<f32> = frames.iter().map(|f| dot(&self.wk.forward(f), &qh) * scale).collect();
+        let keys: Vec<f32> = video.keys.iter().map(|k| dot(k, &qh) * scale).collect();
         let attn = softmax(&keys);
         let mut h = qh.clone();
-        for (f, a) in frames.iter().zip(&attn) {
-            for (hi, vi) in h.iter_mut().zip(self.wv.forward(f)) {
+        for (v, a) in video.values.iter().zip(&attn) {
+            for (hi, vi) in h.iter_mut().zip(v) {
                 *hi += a * vi;
             }
         }
@@ -132,11 +218,33 @@ impl TrainedHead {
         let u: Vec<f32> = self.w1.forward(&h).into_iter().map(gelu_tanh).collect();
         let h2: Vec<f32> = h.iter().zip(self.w2.forward(&u)).map(|(a, b)| a + b).collect();
         let z = self.wz.forward(&h2);
+        let scale = match &self.scale {
+            None => 1.0,
+            Some(Scale::Hidden(w)) => 1.0 + 2.0 * w.forward(&h2)[0].tanh(),
+            Some(Scale::Question(w)) => 1.0 + 2.0 * w.forward(question)[0].tanh(),
+        };
         options
             .iter()
-            .map(|o| self.a_zs * pooled_similarity(frames, o, self.pool_beta) + self.gamma * dot(&z, o))
+            .map(|o| {
+                let mut logit = self.a_zs * scale * pooled_similarity(full, o, self.pool_beta) + self.gamma * dot(&z, o);
+                if let (Some(c), false) = (&self.crops, crop.is_empty()) {
+                    let mean = crop.iter().map(|r| dot(r, o)).sum::<f32>() / crop.len() as f32;
+                    logit += c.a_peak * pooled_similarity(crop, o, c.beta) + c.a_mean * mean;
+                }
+                logit
+            })
             .collect()
     }
+}
+
+/// A video state ready to be asked any number of questions: its rows split
+/// into full views and crops, with the per-row projections a trained head
+/// would otherwise redo for every question.
+pub struct Prepared<'a> {
+    full: &'a [Vec<f32>],
+    crop: &'a [Vec<f32>],
+    keys: Vec<Vec<f32>>,
+    values: Vec<Vec<f32>>,
 }
 
 pub enum Head {
@@ -158,12 +266,28 @@ impl Head {
         }
     }
 
-    pub fn probabilities(&self, frames: &[Vec<f32>], question: &[f32], options: &[Vec<f32>]) -> Vec<f32> {
+    /// `rows`: the video state, its first `n_full` rows full views and the
+    /// rest crops. Zero-shot scoring uses the full views only (crops shift
+    /// every similarity, generic captions most).
+    pub fn prepare<'a>(&self, rows: &'a [Vec<f32>], n_full: usize) -> Prepared<'a> {
+        let (full, crop) = rows.split_at(n_full.min(rows.len()));
+        let (keys, values) = match self {
+            Head::ZeroShot { .. } => (Vec::new(), Vec::new()),
+            Head::Trained(h) => h.project(full, crop),
+        };
+        Prepared { full, crop, keys, values }
+    }
+
+    pub fn probabilities(&self, rows: &[Vec<f32>], n_full: usize, question: &[f32], options: &[Vec<f32>]) -> Vec<f32> {
+        self.probabilities_for(&self.prepare(rows, n_full), question, options)
+    }
+
+    pub fn probabilities_for(&self, video: &Prepared, question: &[f32], options: &[Vec<f32>]) -> Vec<f32> {
         let logits = match self {
             Head::ZeroShot { scale, pool_beta } => {
-                options.iter().map(|o| scale * pooled_similarity(frames, o, *pool_beta)).collect()
+                options.iter().map(|o| scale * pooled_similarity(video.full, o, *pool_beta)).collect()
             }
-            Head::Trained(h) => h.logits(frames, question, options),
+            Head::Trained(h) => h.logits(video, question, options),
         };
         softmax(&logits)
     }
@@ -192,8 +316,15 @@ mod tests {
     }
 
     #[test]
+    fn half_floats_convert_exactly() {
+        for (h, f) in [(0x3c00u16, 1.0f32), (0xc000, -2.0), (0x3555, 0.333_251_95), (0x0001, 5.960_464_5e-8), (0x7bff, 65504.0), (0, 0.0)] {
+            assert_eq!(f16_to_f32(h), f, "{h:#x}");
+        }
+    }
+
+    #[test]
     fn zero_shot_prefers_matching_option() {
-        let p = Head::default().probabilities(&[unit(4)], &unit(0), &[unit(4), unit(5)]);
+        let p = Head::default().probabilities(&[unit(4), unit(5)], 1, &unit(0), &[unit(4), unit(5)]);
         assert!(p[0] > 0.99 && (p.iter().sum::<f32>() - 1.0).abs() < 1e-6);
     }
 }

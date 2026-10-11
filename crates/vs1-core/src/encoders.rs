@@ -7,7 +7,7 @@
 use anyhow::{anyhow, ensure, Context};
 use tract_onnx::prelude::*;
 
-use crate::image::Frame;
+use crate::image::{Frame, Region};
 
 pub const EMBED_DIM: usize = 512;
 pub const IMAGE_SIZE: usize = 256;
@@ -55,7 +55,11 @@ impl ImageEncoder {
     }
 
     pub fn embed(&self, frame: &Frame) -> anyhow::Result<Vec<f32>> {
-        let pixels = frame.to_clip_input(IMAGE_SIZE);
+        self.embed_region(frame, frame.full())
+    }
+
+    pub fn embed_region(&self, frame: &Frame, region: Region) -> anyhow::Result<Vec<f32>> {
+        let pixels = frame.region_to_clip_input(region, IMAGE_SIZE);
         first_output(&self.plan, Tensor::from_shape(&[1, 3, IMAGE_SIZE, IMAGE_SIZE], &pixels)?)
     }
 }

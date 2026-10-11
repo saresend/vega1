@@ -1,0 +1,25 @@
+{
+  "defaults": [
+    "There are people in the video",
+    "The scene is outdoors",
+    "There is a dog",
+    "There is a car",
+    "There is water",
+    "There is food",
+    "The video is captioned",
+    "There is a watermark or logo",
+    "This is computer-generated graphics"
+  ],
+  "suggestions": [
+    "It is nighttime",
+    "There is a tree",
+    "Someone is sitting",
+    "Nobody is in the video",
+    "There is snow",
+    "There is a cat",
+    "It is raining",
+    "The video is in black and white",
+    "There is a building",
+    "There is no dog"
+  ]
+}

@@ -3,7 +3,7 @@
 <video>) and no caching of the page's own code. Binds all interfaces so a
 phone on the same network can open it.
 
-Usage: python3 scripts/serve.py [--port 8765] [--host 0.0.0.0]
+Usage: python3 scripts/serve.py [--port 8765] [--host 0.0.0.0] [--dir web]
 """
 
 import argparse
@@ -63,8 +63,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--dir", type=Path, default=WEB, help="directory to serve (e.g. the gh-pages checkout)")
     args = ap.parse_args()
-    server = ThreadingHTTPServer((args.host, args.port), partial(Handler, directory=str(WEB)))
+    server = ThreadingHTTPServer((args.host, args.port), partial(Handler, directory=str(args.dir)))
     print(f"serving {WEB} on http://{args.host}:{args.port}")
     server.serve_forever()
 

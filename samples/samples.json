@@ -1,0 +1,59 @@
+[
+  {
+    "title": "street",
+    "subtitle": "people, cars, subtitles",
+    "poster": 4,
+    "statements": [
+      "There are people in the video",
+      "People are walking",
+      "There is a car",
+      "The video is captioned",
+      "There is grass",
+      "Nobody is in the video"
+    ],
+    "file": "street.mp4",
+    "credit": "OpenCV sample video (vtest.avi) with subtitles that we added",
+    "embeddings": "street.f32",
+    "frames": 16,
+    "rows": 40,
+    "strip": "street.frames.jpg"
+  },
+  {
+    "title": "cat",
+    "subtitle": "close-up, watermark",
+    "poster": 2,
+    "statements": [
+      "There is a cat",
+      "There is a watermark or logo",
+      "There is a dog",
+      "There is an animal",
+      "There are people in the video",
+      "The video is captioned"
+    ],
+    "file": "cat-play.mp4",
+    "credit": "NairobiPapel(Kamaa) · CC BY-SA 4.0 · Wikimedia Commons",
+    "source": "https://commons.wikimedia.org/wiki/File:Cat_Play_03.webm",
+    "embeddings": "cat-play.f32",
+    "frames": 16,
+    "rows": 40,
+    "strip": "cat-play.frames.jpg"
+  },
+  {
+    "title": "fractal zoom",
+    "subtitle": "computer graphics",
+    "poster": 3,
+    "statements": [
+      "This is computer-generated graphics",
+      "There are people in the video",
+      "The scene is outdoors",
+      "There is a tree",
+      "This is real camera footage"
+    ],
+    "file": "fractal.mp4",
+    "credit": "Computer graphics from the ffmpeg mandelbrot source",
+    "embeddings": "fractal.f32",
+    "frames": 16,
+    "rows": 40,
+    "strip": "fractal.frames.jpg"
+  }
+]

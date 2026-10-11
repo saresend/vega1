@@ -137,6 +137,18 @@ export class SystemOne {
         }
     }
     /**
+     * Loads the category head (vega1-cat) for `choice` and `score` questions.
+     * @param {Uint8Array} head
+     */
+    loadChoiceHead(head) {
+        const ptr0 = passArray8ToWasm0(head, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.systemone_loadChoiceHead(this.__wbg_ptr, ptr0, len0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
      * @param {Uint8Array} text_onnx
      * @param {Uint8Array} tokenizer_json
      */

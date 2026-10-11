@@ -78,15 +78,16 @@ export class SystemOne {
    * (~90 MB) loads with `loadText()` or when a question needs it; the vision
    * encoder (~23 MB, in `workers` workers: up to 4, 2 on phones) loads with
    * `loadVision()` or when a video must be embedded. `head` is an optional
-   * trained-head URL.
+   * trained-head URL; `choiceHead` an optional category head (vega1-cat) that
+   * answers `choice` and `score` questions.
    */
-  static async load({ baseUrl = new URL('.', import.meta.url).href, head = null, workers } = {}) {
+  static async load({ baseUrl = new URL('.', import.meta.url).href, head = null, choiceHead = null, workers } = {}) {
     const mobile = navigator.userAgentData?.mobile ?? (/Android|iPhone|iPad|iPod|Mobi/i.test(navigator.userAgent) ||
       (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1));
     const cores = (navigator.hardwareConcurrency || 2) - 1;
     const n = Math.max(1, Math.min(mobile ? 2 : MAX_WORKERS, workers ?? cores));
     const main = new WorkerClient();
-    const info = await main.call('init', { baseUrl, head, role: 'main' });
+    const info = await main.call('init', { baseUrl, head, choiceHead, role: 'main' });
     const s1 = new SystemOne(main, baseUrl, n);
     s1.info = { ...info, workers: n };
     return s1;

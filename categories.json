@@ -1,0 +1,69 @@
+{
+  "defaults": [
+    {"q": "How many people are in the video?", "options": ["no people", "one person", "a group of people"]},
+    {"q": "Is the video indoors or outdoors?", "options": ["indoors", "outdoors"]},
+    {"q": "Which animal is in the video?", "options": ["dog", "cat", "horse", "bird"]},
+    {"q": "What kind of video is this?", "options": ["real camera footage", "computer-generated graphics"]}
+  ],
+  "suggestions": [
+    {"q": "What is on the ground?", "options": ["grass", "sand", "snow", "a road", "a floor"]},
+    {"q": "Where was this video filmed?", "options": ["a kitchen", "a bedroom", "a city street", "a beach", "a park"]},
+    {"q": "What sport is shown?", "options": ["surfing", "skiing", "tennis", "baseball", "soccer"]},
+    {"q": "Is the video in color or black and white?", "options": ["color", "black and white"]},
+    {"q": "What time of day is it?", "options": ["day", "night"]},
+    {"q": "What text is on the screen?", "options": ["subtitles", "a logo or watermark", "no subtitles or logo"]},
+    {"q": "Which vehicle is in the video?", "options": ["car", "bus", "bicycle", "boat", "train"]},
+    {"q": "What activity is shown?", "options": ["cooking", "playing music", "doing a sport", "walking"]}
+  ],
+  "samples": {
+    "street.mp4": [
+      {"q": "How many people are in the video?", "options": ["no people", "one person", "a group of people"]},
+      {"q": "What is on the ground?", "options": ["grass", "sand", "snow", "a road", "a floor"]},
+      {"q": "Which vehicle is in the video?", "options": ["car", "bus", "bicycle", "boat", "train"]},
+      {"q": "What text is on the screen?", "options": ["subtitles", "a logo or watermark", "no subtitles or logo"]},
+      {"q": "Is the video indoors or outdoors?", "options": ["indoors", "outdoors"]}
+    ],
+    "dog.mp4": [
+      {"q": "Which animal is in the video?", "options": ["dog", "cat", "horse", "bird"]},
+      {"q": "What activity is shown?", "options": ["walking a dog", "riding a horse", "surfing", "cooking"]},
+      {"q": "What is on the ground?", "options": ["grass", "sand", "snow", "a road", "a floor"]},
+      {"q": "How many people are in the video?", "options": ["no people", "one person", "a group of people"]}
+    ],
+    "cat-play.mp4": [
+      {"q": "Which animal is in the video?", "options": ["dog", "cat", "horse", "bird"]},
+      {"q": "What text is on the screen?", "options": ["subtitles", "a logo or watermark", "no subtitles or logo"]},
+      {"q": "How many people are in the video?", "options": ["no people", "one person", "a group of people"]},
+      {"q": "Is the video indoors or outdoors?", "options": ["indoors", "outdoors"]}
+    ],
+    "kitchen.mp4": [
+      {"q": "What activity is shown?", "options": ["cutting vegetables", "playing guitar", "washing dishes", "typing"]},
+      {"q": "Where was this video filmed?", "options": ["a kitchen", "a bedroom", "a city street", "a beach", "a park"]},
+      {"q": "How many people are in the video?", "options": ["no people", "one person", "a group of people"]}
+    ],
+    "surf.mp4": [
+      {"q": "What sport is shown?", "options": ["surfing", "skiing", "tennis", "baseball", "soccer"]},
+      {"q": "Where was this video filmed?", "options": ["on the water", "a kitchen", "a city street", "a park"]},
+      {"q": "How many people are in the video?", "options": ["no people", "one person", "a group of people"]}
+    ],
+    "guitar.mp4": [
+      {"q": "Which instrument is being played?", "options": ["guitar", "piano", "violin", "drums"]},
+      {"q": "Is the video indoors or outdoors?", "options": ["indoors", "outdoors"]},
+      {"q": "How many people are in the video?", "options": ["no people", "one person", "a group of people"]}
+    ],
+    "horse.mp4": [
+      {"q": "Which animal is in the video?", "options": ["dog", "cat", "horse", "bird"]},
+      {"q": "What activity is shown?", "options": ["riding a horse", "walking a dog", "surfing", "cooking"]},
+      {"q": "What is on the ground?", "options": ["grass", "sand", "snow", "a road", "a floor"]}
+    ],
+    "baby.mp4": [
+      {"q": "Who is in the video?", "options": ["a baby", "a teenager", "an old man"]},
+      {"q": "Is the video indoors or outdoors?", "options": ["indoors", "outdoors"]},
+      {"q": "What is on the ground?", "options": ["grass", "sand", "snow", "a road", "a floor"]}
+    ],
+    "fractal.mp4": [
+      {"q": "What kind of video is this?", "options": ["real camera footage", "computer-generated graphics"]},
+      {"q": "Is the video in color or black and white?", "options": ["color", "black and white"]},
+      {"q": "How many people are in the video?", "options": ["no people", "one person", "a group of people"]}
+    ]
+  }
+}

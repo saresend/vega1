@@ -32,7 +32,7 @@ async function fetchBytes(url) {
 const handlers = {
   // role "main": the answer head now, the encoders when asked (loadText,
   // loadVision); role "embed": the vision encoder only, for parallel frames.
-  async init({ baseUrl, head, role = 'main' }) {
+  async init({ baseUrl, head, choiceHead, role = 'main' }) {
     const t0 = performance.now();
     await init();
     self.baseUrl = baseUrl;
@@ -42,6 +42,7 @@ const handlers = {
     }
     const headBytes = head ? await fetchBytes(new URL(head, baseUrl).href) : new Uint8Array();
     model = new SystemOne(headBytes);
+    if (choiceHead) model.loadChoiceHead(await fetchBytes(new URL(choiceHead, baseUrl).href));
     return { model: model.modelName, ms: performance.now() - t0 };
   },
   async loadText() {

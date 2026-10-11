@@ -115,6 +115,35 @@ Test and model-selection sets hold out videos (UCF groups, COCO images), whole s
 `statements.py` holds the phrasings and label tables. A video-language teacher model that writes the same format can
 label any question, including counting.
 
+## vega1-cat: category questions
+
+A second head with the same architecture, trained only on `choice`
+questions ("which animal is in the video?", "how many people?", "where was
+this filmed?"). Load it next to the noul head (`--choice-head` in the CLI,
+`loadChoiceHead` in WASM, `choiceHead` in `vs1.js`): `noul` questions go to
+vega1, `choice`/`score` questions to vega1-cat, in the same request.
+
+```
+cd train
+uv run python build_dataset.py --ucf ... --coco ... --task cat --out data/cat   # reuses data/'s videos
+uv run python train_head.py --data data/cat --name vega1-cat --out data/runs/cat1/head.safetensors
+uv run python finalize_cat.py data/runs/cat1/head.safetensors ../models/vs1/head-cat.safetensors
+```
+
+`finalize_cat.py` halves the learned correction (better on labels never
+trained on) and fits a temperature, both on the selection split.
+
+| test (6,075 questions, 13 kinds) | zero-shot | vega1-cat |
+|---|---|---|
+| accuracy | 81.5% | 93.8% |
+| calibration error (top choice) | 0.107 | 0.027 |
+| unseen subjects (681) | 91.3% | 90.5% |
+| held-out phrasings (3,196) | 80.9% | 92.7% |
+| `time_of_day` (kind never trained on) | 89.9% | 89.3% |
+
+There is no "none of these" option: when no option fits, the probabilities
+spread out and the confidence is low.
+
 ## Status and known limits
 
 Current head (`models/vs1/head.safetensors`), on the held-out test set (`train_head.py` report):

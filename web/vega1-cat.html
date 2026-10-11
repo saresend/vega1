@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vega1-cat</title>
+  <meta name="description" content="Ask category questions about a video. Vega1-cat, a local System 1 model, selects the answer in milliseconds, in your browser. Nothing is uploaded.">
+  <meta property="og:title" content="Vega1-cat: category questions about video, on your device">
+  <meta property="og:description" content="Ask category questions about a video. Vega1-cat, a local System 1 model, selects the answer in milliseconds, in your browser.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://saresend.github.io/vega1/vega1-cat.html">
+  <meta property="og:image" content="https://saresend.github.io/vega1/card-cat.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Vega1-cat: category questions about video, on your device">
+  <meta name="twitter:description" content="Ask a question and give the options. The model selects one in milliseconds, on your device.">
+  <meta name="twitter:image" content="https://saresend.github.io/vega1/card-cat.png">
+  <meta name="theme-color" content="#242F40">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23242F40'/%3E%3Cpath d='M12 9v14l11-7z' fill='%23CCA43B'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <style>
+    /* Category questions: a question, then one bar for each option. */
+    .cqs { list-style: none; margin: 0; padding: 0; }
+    .cq { padding: 10px 0; border-bottom: 1px solid var(--border); }
+    .cq:first-child { padding-top: 0; }
+    .cq-head { display: flex; align-items: center; gap: 10px; }
+    .cq-head .text { flex: 1; min-width: 0; color: var(--head); font-weight: 700; overflow-wrap: anywhere; }
+    .cq .tag { max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cq.sure .tag { background: var(--gold); border-color: var(--gold); color: var(--navy); }
+    .cq.unsure .tag { border-style: dashed; border-color: var(--gold); color: var(--fg); }
+    .cq.idle .tag, .cq.pending .tag { visibility: hidden; }
+    .cq:hover .remove { opacity: 1; }
+    .opts { list-style: none; margin: 6px 0 0; padding: 0 0 0 14px; border-left: 1px solid var(--border); }
+    .opt { display: grid; grid-template-columns: minmax(0, 1fr) auto 3.4em; align-items: center; gap: 12px; padding: 1px 0; color: var(--muted); font-size: 13px; }
+    .opt .label { overflow-wrap: anywhere; }
+    .opt .pct { font-weight: 400; color: var(--muted); }
+    .opt.best { color: var(--head); font-weight: 700; }
+    .opt.best .pct { font-weight: 700; color: var(--head); }
+    .cq.sure .opt.best .bar .on { color: var(--yes); }
+    .cq.unsure .opt.best .bar .on { color: var(--unsure); }
+    .cq.pending .bar .off { animation: blink 0.9s steps(2) infinite; }
+    .cq.idle .pct, .cq.pending .pct { color: var(--faint); }
+    .add + .add { margin-top: -1px; }
+    .add .prompt.word { min-width: 5.2em; color: var(--faint); font-weight: 400; }
+    .model-switch { font-size: 12.5px; color: var(--muted); }
+    @media (max-width: 560px) {
+      .opts { padding-left: 10px; }
+      .opt { gap: 8px; font-size: 12.5px; }
+      .opt .bar { font-size: 8px; letter-spacing: -0.1em; }
+      .cq .remove { width: 30px; height: 30px; }
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>Vega1-cat</h1>
+    <div class="nav-right">
+      <a class="model-switch" href="./">yes/no model: Vega1</a>
+      <span class="local" title="The video and your questions stay on this device">
+        <svg class="i" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>on your device only
+      </span>
+      <span id="model-pill" data-state="busy" role="status" aria-live="polite"><span class="led"></span><span id="model-status">Vega1-cat loads…</span></span>
+    </div>
+  </header>
+
+  <div class="grid">
+    <section class="panel" aria-labelledby="video-title">
+      <div class="panel-head">
+        <h2 id="video-title"><small>01</small>video</h2>
+        <span class="spacer"></span>
+        <button class="ghost" id="change">
+          <svg class="i" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M4 20h16"/></svg>your video
+        </button>
+      </div>
+      <div class="panel-body">
+        <input type="file" id="file" accept="video/*" hidden>
+        <div id="picker">
+          <div class="drop" id="drop">
+            <strong>put a video here</strong>
+            <span class="hint">MP4, WebM or MOV. The video stays on this device.</span><br>
+            <button class="btn" id="browse">
+              <svg class="i" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M4 20h16"/></svg>select a video
+            </button>
+          </div>
+        </div>
+
+        <div id="viewer" hidden>
+          <div class="player"><video id="preview" controls muted playsinline loop></video></div>
+          <div class="file-row"><span class="name" id="file-name"></span><span id="file-meta"></span></div>
+          <div class="frames-head">
+            <span id="frames-status">sampled frames</span>
+            <span class="spacer"></span>
+            <div class="seg" role="group" aria-label="Frames to sample">
+              <button data-frames="8" aria-pressed="false">8</button>
+              <button data-frames="16" aria-pressed="true">16</button>
+              <button data-frames="32" aria-pressed="false">32</button>
+            </div>
+          </div>
+          <div class="strip" id="strip"></div>
+          <div class="progress"><i id="progress"></i></div>
+          <div class="legend"><b></b>the model also examines 6 close-up crops of these frames to find small details</div>
+        </div>
+        <div id="samples-home"></div>
+        <div id="samples-wrap" hidden>
+          <div class="label-row"><b>samples</b><span>the embeddings are ready, so the answers show immediately</span></div>
+          <div class="samples" id="samples"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="cqs-title">
+      <div class="panel-head">
+        <h2 id="cqs-title"><small>02</small>questions</h2>
+        <span class="count" id="count"></span>
+        <span class="spacer"></span>
+        <button class="ghost" id="reset" title="Show the example questions again">reset</button>
+      </div>
+      <div class="panel-body">
+        <ul class="cqs" id="cqs" aria-live="polite"></ul>
+        <div class="empty" id="empty" hidden>There are no questions. Add a question below.</div>
+        <form id="add-form" autocomplete="off">
+          <div class="add">
+            <span class="prompt" aria-hidden="true">&gt;</span>
+            <input id="q-input" placeholder="which animal is in the video?" aria-label="New question" maxlength="300">
+          </div>
+          <div class="add">
+            <span class="prompt word" aria-hidden="true">options</span>
+            <input id="opt-input" placeholder="dog, cat, horse" aria-label="Options, with commas between them" maxlength="400">
+            <button id="add-btn" type="submit" disabled>ask</button>
+          </div>
+        </form>
+        <div class="text-status" id="text-status" aria-live="polite"></div>
+        <div class="suggest" id="suggest"></div>
+      </div>
+      <div class="foot" id="foot"><span id="foot-text">Select a video. Then the model answers the questions.</span></div>
+    </section>
+  </div>
+
+  <section class="about" aria-labelledby="about-title">
+    <div class="about-grid">
+      <div>
+        <h2 id="about-title"><small>03</small>what is this</h2>
+        <p><strong>Vega1-cat is a local System 1 model for category questions about video.</strong> You write a question
+          and two or more options. The model selects the option that agrees with the video. It also gives the
+          probability of each option.</p>
+        <p>"System 1" is the fast type of human thought that gives an immediate answer. Vega1-cat does not write text,
+          and it does not show its steps. It examines a video one time. Then it answers all of your questions in one
+          step.</p>
+        <p>Vega1-cat uses the same structure as the TypeSafe Jev System One API: <code>choice</code> questions in, typed
+          answers out. The state is a video. For yes/no statements, use <a href="./">Vega1</a>. The two models use the
+          same video embeddings.</p>
+        <p>The full model operates on your device, in this browser tab. It operates on a laptop or on a phone. The model
+          does not send the video or your questions to a server.</p>
+      </div>
+      <div>
+        <h2><small>04</small>how it works</h2>
+        <pre class="ascii" aria-hidden="true">┌─ <b>your browser</b> ────────────────────────────────────────────┐
+│                                                           │
+│  video ─────────────&gt; <b>image encoder</b> ──&gt; frames ─┐         │
+│                                                 ├─&gt; <u>dog</u>   │
+│  &quot;which animal?&quot;                                │         │
+│   dog, cat, horse ──&gt; <b>text encoder</b> ──&gt; options ─┘         │
+│                                                           │
+└───────────────────────────────────────────────────────────┘</pre>
+        <ul class="how">
+          <li><b>frames</b> The model takes 16 frames from the video. The MobileCLIP-S0 image encoder makes an embedding
+            of each frame and of 6 close-up crops of 4 frames.</li>
+          <li><b>options</b> The text encoder makes an embedding of each option, together with the question.</li>
+          <li><b>answer head</b> An attention head with 1 million parameters compares the frames with each option. It
+            gives a probability for each option. The probabilities add up to 100%. We trained the head on 61,000
+            category questions with labels: objects, animals, places, ground surfaces, sports, activities, the number of
+            people, color, text on the screen and computer graphics.</li>
+          <li><b>speed</b> The model embeds a video one time. After that, each question takes approximately 20
+            milliseconds.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><b id="stat-latency">~20 ms</b><span id="stat-latency-label">for each question, after the model embeds the video</span></div>
+      <div class="stat"><b>93.8%</b><span>correct answers on 6,000 test questions</span></div>
+      <div class="stat"><b>90.5%</b><span>correct when the answer is a label that the model did not see in training</span></div>
+      <div class="stat"><b>0 bytes</b><span>sent to a server: all work occurs on your device</span></div>
+    </div>
+
+    <h2><small>05</small>limits</h2>
+    <ul class="how limits">
+      <li>The model always selects one option. It has no "none of these" answer. If no option is correct, the
+        probabilities are low and similar. Add an option such as "no animal" if necessary.</li>
+      <li>We did not train the model on colors of objects ("what color is the van?"). These answers are frequently
+        not correct.</li>
+      <li>The model can miss very small objects, also with the close-up crops.</li>
+      <li>The model cannot count exactly. Use options such as "no people", "one person" and "a group of people".</li>
+      <li>Text on the screen can change the answers, because the encoder reads the text.</li>
+      <li>The model examines only the sampled frames. It does not see events between these frames.</li>
+    </ul>
+  </section>
+
+  <div id="samples-mobile"></div>
+
+  <footer>
+    <span>MobileCLIP-S0 and a trained answer head · Rust and WebAssembly · typed answers as in Jev</span>
+    <span>Sample videos: OpenCV · UCF101 (for research only) · Wikimedia Commons (CC BY-SA, with credit for each video)</span>
+  </footer>
+</div>
+<script type="module" src="cat.js"></script>
+</body>
+</html>

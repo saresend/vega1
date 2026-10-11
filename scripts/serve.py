@@ -20,7 +20,7 @@ class Handler(SimpleHTTPRequestHandler):
     extensions_map = {**SimpleHTTPRequestHandler.extensions_map, ".wasm": "application/wasm", ".mjs": "text/javascript"}
 
     def end_headers(self):
-        if self.path.split("?")[0].endswith((".html", ".js", "/")):
+        if self.path.split("?")[0].endswith((".html", ".js", ".css", ".json", "/")):
             self.send_header("Cache-Control", "no-cache")
         self.send_header("Accept-Ranges", "bytes")
         super().end_headers()

@@ -96,6 +96,12 @@ impl SystemOne {
         self.inner.load_vision(vision_onnx).map_err(|e| js_err(format!("{e:#}")))
     }
 
+    /// Loads the category head (vega1-cat) for `choice` and `score` questions.
+    #[wasm_bindgen(js_name = loadChoiceHead)]
+    pub fn load_choice_head(&mut self, head: &[u8]) -> Result<(), JsError> {
+        self.inner.load_choice_head(head).map_err(|e| js_err(format!("{e:#}")))
+    }
+
     #[wasm_bindgen(js_name = loadText)]
     pub fn load_text(&mut self, text_onnx: &[u8], tokenizer_json: &[u8]) -> Result<(), JsError> {
         self.inner.load_text(text_onnx, tokenizer_json).map_err(|e| js_err(format!("{e:#}")))

@@ -6,7 +6,7 @@ file's own metadata) and two local test clips. Each is trimmed to a few
 seconds, scaled to 640 px wide and encoded as H.264 with faststart.
 Downloads are sequential and cached (default: ~/Development/Projects/vega/data/commons_samples).
 
-Usage: python3 scripts/fetch-samples.py [--cache DIR] [--local-only]
+Usage: python3 scripts/fetch-samples.py [--cache DIR] [--local-only] [--texts-only]
 Standard library + ffmpeg only.
 """
 
@@ -104,7 +104,10 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache", type=Path, default=Path.home() / "Development/Projects/vega/data/commons_samples")
     ap.add_argument("--local-only", action="store_true", help="skip the Wikimedia Commons clips (offline)")
+    ap.add_argument("--texts-only", action="store_true", help="only re-embed the pages' texts (samples.json exists)")
     args = ap.parse_args()
+    if args.texts_only:
+        return embed_texts(json.loads((OUT / "samples.json").read_text()))
     args.cache.mkdir(parents=True, exist_ok=True)
     OUT.mkdir(parents=True, exist_ok=True)
     manifest = []
@@ -158,17 +161,31 @@ def main() -> None:
         print(f"{entry['file']:18s} {dst.stat().st_size / 1e6:5.1f} MB  {entry['rows']} rows  {entry['credit']}")
         manifest.append(entry)
     (OUT / "samples.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+    embed_texts(manifest)
+    print(f"wrote {len(manifest)} samples to {OUT}")
+
+
+def run_embed_texts(items: list, out: Path) -> int:
+    listing = OUT / "texts.tmp.json"
+    listing.write_text(json.dumps(items))
+    res = subprocess.run([str(VS1), "embed-texts", str(listing), "--out", str(out)],
+                         check=True, capture_output=True, text=True).stdout
+    listing.unlink()
+    return json.loads(res)["texts"]
+
+
+def embed_texts(manifest: list) -> None:
     # Text embeddings for every statement the page offers (samples, defaults,
     # suggestions): the page answers these before its text encoder downloads.
     page = json.loads((ROOT / "web" / "statements.json").read_text())
     texts = list(dict.fromkeys([t for e in manifest for t in e["statements"]] + page["defaults"] + page["suggestions"]))
-    listing = OUT / "statements.tmp.json"
-    listing.write_text(json.dumps(texts))
-    out = subprocess.run([str(VS1), "embed-texts", str(listing), "--out", str(OUT / "texts.f32")],
-                         check=True, capture_output=True, text=True).stdout
-    listing.unlink()
-    print(f"{len(texts)} statements → {json.loads(out)['texts']} text embeddings")
-    print(f"wrote {len(manifest)} samples to {OUT}")
+    print(f"{len(texts)} statements → {run_embed_texts(texts, OUT / 'texts.f32')} text embeddings")
+    # The same for the category page (vega1-cat.html): web/categories.json.
+    cats = json.loads((ROOT / "web" / "categories.json").read_text())
+    items = cats["defaults"] + cats["suggestions"] + [q for qs in cats["samples"].values() for q in qs]
+    questions = list({json.dumps(q, sort_keys=True): {"type": "choice", "instructions": q["q"],
+                                                      "criteria": {o: None for o in q["options"]}} for q in items}.values())
+    print(f"{len(questions)} category questions → {run_embed_texts(questions, OUT / 'texts-cat.f32')} text embeddings")
 
 
 if __name__ == "__main__":

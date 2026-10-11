@@ -99,12 +99,12 @@ def slice_names(e) -> list[str]:
     seen = "unseen" if t["unseen"] else "seen"
     phrase = "heldout-phrase" if t["heldout_phrase"] else "train-phrase"
     names = [f"{t['kind']:15s} {seen:6s} {phrase}", "ALL"]
-    if e["question"]["type"] == "noul":
-        names.append("ALL noul")
-        if t["unseen"]:
-            names.append("ALL noul, unseen statements")
-        if t["heldout_phrase"]:
-            names.append("ALL noul, held-out phrasings")
+    kind = e["question"]["type"]
+    names.append(f"ALL {kind}")
+    if t["unseen"]:
+        names.append(f"ALL {kind}, unseen {'statements' if kind == 'noul' else 'subjects'}")
+    if t["heldout_phrase"]:
+        names.append(f"ALL {kind}, held-out phrasings")
     return names
 
 
@@ -126,6 +126,8 @@ def evaluate(model, examples, texts, videos):
                 g["nll"] += float(nll[i])
                 if e["question"]["type"] == "noul":
                     g["noul"].append((float(probs[i, 0]), float(target[i, 0])))
+                else:  # calibration of the chosen option
+                    g["noul"].append((float(probs[i].max()), float(probs[i].argmax() == target[i].argmax())))
     model.train()
     out = {}
     for name, g in groups.items():
@@ -140,7 +142,7 @@ def evaluate(model, examples, texts, videos):
 
 
 def report(before, after):
-    print(f"\n{'slice':38s} {'n':>5s}  {'acc zero-shot→trained':>22s}  {'NLL':>15s}  {'ECE (noul)':>15s}")
+    print(f"\n{'slice':38s} {'n':>5s}  {'acc zero-shot→trained':>22s}  {'NLL':>15s}  {'ECE':>15s}")
     for name in sorted(after, key=lambda n: (n.startswith("ALL"), n)):
         b, a = before[name], after[name]
         ece = f"{b['ece']:.3f}→{a['ece']:.3f}" if a["ece"] is not None else ""
@@ -148,6 +150,7 @@ def report(before, after):
 
 
 def main() -> None:
+    global DATA
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--batch", type=int, default=128)
@@ -167,7 +170,11 @@ def main() -> None:
     ap.add_argument("--text-noise", type=float, default=0.04,
                     help="std of Gaussian noise added to unit text embeddings in training (re-normalised)")
     ap.add_argument("--out", type=Path, default=ROOT.parent / "models" / "vs1" / "head.safetensors")
+    ap.add_argument("--data", type=Path, default=DATA, help="dataset directory (examples.jsonl, text/)")
+    ap.add_argument("--init", type=Path, help="start from this exported head (e.g. the noul head)")
+    ap.add_argument("--name", default="vs1-head", help="model name prefix in the exported metadata")
     args = ap.parse_args()
+    DATA = args.data
     torch.manual_seed(args.seed)
     random.seed(args.seed)
 
@@ -187,6 +194,10 @@ def main() -> None:
     model = AnswerHead(hidden=args.hidden, mlp=args.mlp, dropout=args.dropout, scale_from=args.scale_from, crops=crops,
                        crop_attention=not args.no_crop_attention)
     before = evaluate(model, test, texts, videos)
+    if args.init:
+        from eval_by_size import load_head
+        model.load_state_dict(load_head(str(args.init)).state_dict(), strict=False)
+        print(f"initialised from {args.init}: {evaluate(model, test, texts, videos)['ALL']}")
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     best, best_state = float("inf"), None
@@ -225,7 +236,7 @@ def main() -> None:
     print(f"\nlearned: a_zs={model.a_zs.item():.2f} gamma={model.gamma.item():.3f} pool_beta={model.pool_beta.item():.2f}")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    name = f"vs1-head-{date.today().isoformat()}"
+    name = f"{args.name}-{date.today().isoformat()}"
     model.export(args.out, name)
     (args.out.with_suffix(".metrics.json")).write_text(
         json.dumps({"config": {k: str(v) for k, v in vars(args).items()}, "zero_shot": before, "trained": after}, indent=2))

@@ -21,6 +21,10 @@ if [[ -f models/vs1/head.safetensors ]]; then
   # Half-size copy for the page (the head still computes in f32).
   uv run --project train python scripts/half-head.py models/vs1/head.safetensors web/models/head.safetensors
 fi
+if [[ -f models/vs1/head-cat.safetensors ]]; then
+  # vega1-cat: the category head (choice/score questions), from train/finalize_cat.py.
+  uv run --project train python scripts/half-head.py models/vs1/head-cat.safetensors web/models/head-cat.safetensors
+fi
 # Sample videos for the demo (not committed): python3 scripts/fetch-samples.py
 [[ -f web/samples/samples.json ]] || echo "tip: run scripts/fetch-samples.py to add the demo's sample videos"
 ls -la web/pkg web/models

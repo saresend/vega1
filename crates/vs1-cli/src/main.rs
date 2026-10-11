@@ -23,11 +23,11 @@ const DEFAULT_MODELS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../models/
 const MAX_ANALYSIS_WIDTH: usize = 640;
 
 const USAGE: &str = "usage:
-  vs1 evaluate <video> --questions q.json [--frames 16] [--crop-frames 4] [--head h.safetensors] [--models DIR]
+  vs1 evaluate <video> --questions q.json [--frames 16] [--crop-frames 4] [--head h.safetensors] [--choice-head c.safetensors] [--models DIR]
   vs1 embed-video <video>... --out-dir DIR [--frames 16] [--crops-only [--crop-frames 4]] [--models DIR]
   vs1 embed-state <video> --out rows.f32 [--frames 16] [--crop-frames 4] [--models DIR]
   vs1 embed-questions <questions.jsonl> --out-dir DIR [--models DIR]
-  vs1 embed-texts <statements.json> --out texts.f32 [--models DIR]
+  vs1 embed-texts <questions.json> --out texts.f32 [--models DIR]
   vs1 check-head <head.safetensors> <parity.json>";
 
 struct Args {
@@ -39,6 +39,7 @@ struct Args {
     crop_frames: usize,
     crops_only: bool,
     head: Option<PathBuf>,
+    choice_head: Option<PathBuf>,
     models: PathBuf,
     out_dir: Option<PathBuf>,
     out: Option<PathBuf>,
@@ -59,6 +60,7 @@ fn parse_args() -> anyhow::Result<Args> {
         crop_frames: vs1_core::CROP_FRAMES,
         crops_only: false,
         head: None,
+        choice_head: None,
         models: PathBuf::from(DEFAULT_MODELS),
         out_dir: None,
         out: None,
@@ -71,6 +73,7 @@ fn parse_args() -> anyhow::Result<Args> {
             "--crop-frames" => args.crop_frames = value()?.parse()?,
             "--crops-only" => args.crops_only = true,
             "--head" => args.head = Some(value()?.into()),
+            "--choice-head" => args.choice_head = Some(value()?.into()),
             "--models" => args.models = value()?.into(),
             "--out-dir" => args.out_dir = Some(value()?.into()),
             "--out" => args.out = Some(value()?.into()),
@@ -197,6 +200,9 @@ fn main() -> anyhow::Result<()> {
             let [video] = args.positional.as_slice() else { bail!("evaluate takes one video\n{USAGE}") };
             let request = read_request(args.questions.as_deref().context("--questions is required")?)?;
             let mut model = load_model(&args.models, args.head.as_deref())?;
+            if let Some(p) = &args.choice_head {
+                model.load_choice_head(&std::fs::read(p).with_context(|| format!("reading {}", p.display()))?)?;
+            }
             let compiled = model.compile(&request)?;
             let (rows, frames) = embed_video(&model, video, args.frames, args.crop_frames)?;
             println!("{}", serde_json::to_string_pretty(&model.answer(&rows, frames, &compiled)?)?);
@@ -236,17 +242,21 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::json!({ "frames": frames, "rows": rows.len() }));
         }
         "embed-texts" => {
-            // Text embeddings for a JSON list of yes/no statements, for the web
-            // page to answer them before its text encoder downloads: 513 floats
-            // per text (embedding, then token count) in texts.f32, and the
+            // Text embeddings for a JSON list of questions (a string is a
+            // yes/no statement, an object a Jev question), for the web page to
+            // answer them before its text encoder downloads: 513 floats per
+            // text (embedding, then token count) in texts.f32, and the
             // (context, focus) keys in texts.json next to it.
             let [path] = args.positional.as_slice() else { bail!("embed-texts takes one file\n{USAGE}") };
             let out = args.out.context("--out is required")?;
-            let statements: Vec<String> = serde_json::from_str(&std::fs::read_to_string(path)?)?;
-            let questions: serde_json::Map<String, serde_json::Value> = statements
-                .iter()
+            let items: Vec<serde_json::Value> = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+            let questions: serde_json::Map<String, serde_json::Value> = items
+                .into_iter()
                 .enumerate()
-                .map(|(i, s)| (format!("s{i}"), serde_json::json!({ "type": "noul", "instructions": s })))
+                .map(|(i, q)| match q {
+                    serde_json::Value::String(s) => (format!("s{i}"), serde_json::json!({ "type": "noul", "instructions": s })),
+                    q => (format!("s{i}"), q),
+                })
                 .collect();
             let request = Request::parse(&serde_json::json!({ "questions": questions }).to_string())
                 .map_err(|e| anyhow::anyhow!("{e}"))?;

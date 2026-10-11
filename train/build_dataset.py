@@ -39,6 +39,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import categories as cat
 import statements as st
 
 ROOT = Path(__file__).resolve().parent
@@ -602,6 +603,9 @@ def main() -> None:
     ap.add_argument("--frames", type=int, default=16)
     ap.add_argument("--workers", type=int, default=10)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--task", choices=["noul", "cat"], default="noul",
+                    help="noul: yes/no statements (vega1); cat: category questions (vega1-cat)")
+    ap.add_argument("--out", type=Path, default=DATA, help="where examples and text embeddings go (videos stay in data/)")
     args = ap.parse_args()
     rng = random.Random(args.seed)
 
@@ -699,6 +703,16 @@ def main() -> None:
         tags = {"source": v["source"], "edits": sorted(v["edits"]),
                 **({"class": v["cls"]} if v["source"] == "ucf" else {"image": v["id"]})}
         w = Writer(examples, rng, npy, v["split"], tags)
+        if args.task == "cat":
+            c = cat.Choices(w, rng)
+            if v["source"] == "ucf":
+                cat.ucf(c, v, classes, heldout)
+            elif v["source"] == "coco":
+                cat.coco(c, v, allowed[v["split"]], unseen_sel | unseen_test, supercat)
+            else:
+                cat.synth(c)
+            cat.common(c, v["source"], v["edits"], v["gray_native"])
+            continue
         if v["source"] == "ucf":
             ucf_questions(w, v, classes, heldout, rng)
         elif v["source"] == "coco":
@@ -710,14 +724,16 @@ def main() -> None:
             w.noul(kind, kind == "camera")
         edit_questions(w, v["edits"], v["gray_native"], rng)
 
-    with open(DATA / "examples.jsonl", "w") as f:
+    out = args.out
+    out.mkdir(parents=True, exist_ok=True)
+    with open(out / "examples.jsonl", "w") as f:
         for ex in examples:
             f.write(json.dumps(ex) + "\n")
-    with open(DATA / "questions.jsonl", "w") as f:
+    with open(out / "questions.jsonl", "w") as f:
         for ex in examples:
             f.write(json.dumps(ex["question"]) + "\n")
-    embed_questions([ex["question"] for ex in examples], DATA / "text", args.workers)
-    (DATA / "split.json").write_text(json.dumps({
+    embed_questions([ex["question"] for ex in examples], out / "text", args.workers)
+    (out / "split.json").write_text(json.dumps({
         "heldout_classes": sorted(heldout), "val_groups": sorted(VAL_GROUPS),
         "heldout_coco_categories": {"selection": sorted(unseen_sel), "test": sorted(unseen_test)},
         "heldout_attributes": sorted(st.HELDOUT_ATTRIBUTES | st.HELDOUT_COCO_ATTRIBUTES),

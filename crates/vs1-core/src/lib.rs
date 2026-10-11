@@ -131,6 +131,10 @@ pub struct SystemOne {
     vision: Option<FrameEmbedder>,
     text: Option<TextEncoder>,
     head: Head,
+    /// The category head (vega1-cat), if loaded: it answers `choice` and
+    /// `score` questions, and `head` answers `noul`s. Without it `head`
+    /// answers everything.
+    choice_head: Option<Head>,
     text_cache: HashMap<(String, String), (Vec<f32>, usize)>,
 }
 
@@ -144,12 +148,26 @@ impl SystemOne {
             vision: files.vision_onnx.map(FrameEmbedder::new).transpose()?,
             text: files.text.map(|(onnx, tokenizer)| TextEncoder::from_bytes(onnx, tokenizer)).transpose()?,
             head,
+            choice_head: None,
             text_cache: HashMap::new(),
         })
     }
 
     pub fn model_name(&self) -> &str {
         self.head.name()
+    }
+
+    /// Loads a category head (safetensors) for `choice` and `score` questions.
+    pub fn load_choice_head(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        self.choice_head = Some(Head::Trained(TrainedHead::from_safetensors(bytes)?));
+        Ok(())
+    }
+
+    fn head_for(&self, kind: &Kind) -> (usize, &Head) {
+        match (kind, &self.choice_head) {
+            (Kind::Choice { .. } | Kind::Score { .. }, Some(h)) => (1, h),
+            _ => (0, &self.head),
+        }
     }
 
     pub fn load_vision(&mut self, vision_onnx: &[u8]) -> anyhow::Result<()> {
@@ -251,9 +269,16 @@ impl SystemOne {
     pub fn answer(&self, rows: &[Vec<f32>], frames: usize, compiled: &Compiled) -> anyhow::Result<Response> {
         anyhow::ensure!(!rows.is_empty(), "the video state has no frames");
         let mut answers = IndexMap::new();
-        let video = self.head.prepare(rows, frames);
+        // Each head projects the rows once, if any question needs it.
+        let mut prepared = [None, None];
+        let mut used: Vec<&str> = Vec::new();
         for q in &compiled.questions {
-            let probs = self.head.probabilities_for(&video, &q.question, &q.options);
+            let (slot, head) = self.head_for(&q.kind);
+            let video = prepared[slot].get_or_insert_with(|| {
+                used.push(head.name());
+                head.prepare(rows, frames)
+            });
+            let probs = head.probabilities_for(video, &q.question, &q.options);
             let answer = match &q.kind {
                 Kind::Noul { negated } => Answer::Noul { noul: round4(if *negated { 1.0 - probs[0] } else { probs[0] }) },
                 Kind::Choice { labels } => {
@@ -274,7 +299,7 @@ impl SystemOne {
             answers.insert(q.key.clone(), answer);
         }
         Ok(Response {
-            model: self.model_name().to_string(),
+            model: if used.is_empty() { self.model_name().to_string() } else { used.join("+") },
             answers,
             usage: Usage { input_frames: frames, input_tokens: compiled.input_tokens, output_tokens: 0 },
         })
